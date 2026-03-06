@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.11",
+    "@google/genai": "^1.44.0",
     "@inngest/realtime": "^0.4.5",
     "@mastra/core": "^1.0.4",
     "@mastra/inngest": "^1.0.0",
@@ -31,11 +32,16 @@
     "@types/pg": "^8.15.5",
     "ai": "^5.0.0",
     "dotenv": "^17.2.0",
+    "drizzle-zod": "^0.8.3",
+    "googleapis": "^148.0.0",
     "inngest": "^3.47.0",
     "inngest-cli": "^1.14.3",
+    "p-limit": "^7.3.0",
+    "p-retry": "^7.1.1",
     "pino": "^9.9.4",
     "tsx": "^4.20.3",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "zod-validation-error": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^25.0.10",
