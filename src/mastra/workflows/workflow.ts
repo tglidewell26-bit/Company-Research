@@ -7,6 +7,8 @@ import { discoverCompaniesTool } from "../tools/discoverCompanies";
 import { deduplicateCompaniesTool } from "../tools/deduplicator";
 import { generateOverviewTool } from "../tools/overviewGenerator";
 import { writeProspectsTool } from "../tools/writeProspects";
+import { appendSheetRows } from "../tools/googleSheets";
+import { SHEET_TABS } from "../tools/sheetConfig";
 
 const companySchema = z.object({
   name: z.string(),
@@ -33,13 +35,15 @@ const loadExclusionData = createStep({
 
     const result = await loadExclusionListsTool.execute({}, { mastra });
     if ("error" in result && result.error) {
-      throw new Error(`Failed to load exclusion lists: ${JSON.stringify(result)}`);
+      throw new Error(
+        `Failed to load exclusion lists: ${JSON.stringify(result)}`,
+      );
     }
 
-    const dontSearch = [...result.excludedCompanies, ...result.startingList];
+    const dontSearch = [...result.excludedCompanies];
 
     logger?.info(
-      `📋 [Step 1] Loaded ${result.excludedCompanies.length} excluded + ${result.startingList.length} starting = ${dontSearch.length} total exclusions`,
+      `📋 [Step 1] Loaded ${result.excludedCompanies.length} ignored companies and ${result.startingList.length} existing companies`,
     );
 
     return {
@@ -91,25 +95,51 @@ const validateStartingList = createStep({
       { mastra },
     );
     if ("error" in webResult && webResult.error) {
-      throw new Error(`Website validation failed: ${JSON.stringify(webResult)}`);
+      throw new Error(
+        `Website validation failed: ${JSON.stringify(webResult)}`,
+      );
     }
 
     const aliveCompanies = webResult.validCompanies
-      .filter((c) => c.websiteAlive)
+      .filter((c) => c.websiteAlive && c.companyExists)
       .map((c) => ({ name: c.name, website: c.website }));
 
     logger?.info(
-      `🔍 [Step 2] ${aliveCompanies.length} companies have valid websites (${webResult.invalidCount} failed)`,
+      `🔍 [Step 2] ${aliveCompanies.length} companies passed website + existence checks (${webResult.invalidCount} failed)`,
+    );
+
+    const geoResult = await geocodeAndValidateTerritoryTool.execute(
+      {
+        companies: aliveCompanies.map((company) => ({
+          name: company.name,
+          website: company.website,
+        })),
+      },
+      { mastra },
+    );
+
+    if ("error" in geoResult && geoResult.error) {
+      throw new Error(
+        `Territory validation failed for starting list: ${JSON.stringify(geoResult)}`,
+      );
+    }
+
+    const validatedStartingList = geoResult.validCompanies
+      .filter((c) => c.inTerritory)
+      .map((c) => ({ name: c.name, website: c.website }));
+
+    logger?.info(
+      `📍 [Step 2] ${validatedStartingList.length} existing companies are in territory (${geoResult.outOfTerritoryCount} out, ${geoResult.geocodeFailCount} geocode failed)`,
     );
 
     const validatedDontSearch = [
       ...inputData.excludedCompanies,
-      ...aliveCompanies,
+      ...validatedStartingList,
     ];
 
     return {
       spreadsheetId: inputData.spreadsheetId,
-      validatedStartingList: aliveCompanies,
+      validatedStartingList,
       dontSearch: validatedDontSearch,
       invalidCount: webResult.invalidCount,
     };
@@ -146,12 +176,17 @@ const runDiscoveryLoop = createStep({
     logger?.info("🔄 [Step 3] Starting discovery loop...");
 
     let dontSearch = [...inputData.dontSearch];
-    const allDiscovered: { name: string; website: string }[] = [];
+    const allDiscovered: { name: string; website: string }[] = [
+      ...inputData.validatedStartingList,
+    ];
     let zeroRounds = 0;
     let iteration = 0;
     let totalDuplicatesRemoved = 0;
     let totalOutOfTerritory = 0;
-    const maxIterations = 7;
+    const maxIterations = parseInt(
+      process.env.MAX_DISCOVERY_ITERATIONS || "20",
+      10,
+    );
 
     while (zeroRounds < 3 && iteration < maxIterations) {
       iteration++;
@@ -175,7 +210,7 @@ const runDiscoveryLoop = createStep({
 
       const discovered = discoveryResult.discoveredCompanies;
       logger?.info(
-        `🔎 [Step 3] Iteration ${iteration}: Gemini returned ${discovered.length} companies`,
+        `🔎 [Step 3] Iteration ${iteration}: AI discovery returned ${discovered.length} companies`,
       );
 
       if (discovered.length === 0) {
@@ -228,9 +263,7 @@ const runDiscoveryLoop = createStep({
         { mastra },
       );
       if ("error" in geoResult && geoResult.error) {
-        logger?.warn(
-          `⚠️ [Step 3] Geocoding failed in iteration ${iteration}`,
-        );
+        logger?.warn(`⚠️ [Step 3] Geocoding failed in iteration ${iteration}`);
         zeroRounds++;
         continue;
       }
@@ -265,14 +298,12 @@ const runDiscoveryLoop = createStep({
       `\n🏁 [Step 3] Discovery loop complete after ${iteration} iterations`,
     );
     logger?.info(
-      `🏁 [Step 3] Total discovered: ${allDiscovered.length} companies`,
+      `🏁 [Step 3] Total final qualified list: ${allDiscovered.length} companies (existing + newly discovered)`,
     );
     logger?.info(
       `🏁 [Step 3] Total duplicates removed: ${totalDuplicatesRemoved}`,
     );
-    logger?.info(
-      `🏁 [Step 3] Total out of territory: ${totalOutOfTerritory}`,
-    );
+    logger?.info(`🏁 [Step 3] Total out of territory: ${totalOutOfTerritory}`);
 
     return {
       spreadsheetId: inputData.spreadsheetId,
@@ -304,6 +335,8 @@ const generateOverviewsStep = createStep({
         name: z.string(),
         website: z.string(),
         overview: z.string(),
+        fitStatus: z.enum(["Good Fit", "Maybe", "Poor Fit"]),
+        fitRationale: z.string(),
       }),
     ),
     stats: z.object({
@@ -335,14 +368,15 @@ const generateOverviewsStep = createStep({
     }
 
     const batchSize = 10;
-    const allResults: { name: string; website: string; overview: string }[] =
-      [];
+    const allResults: {
+      name: string;
+      website: string;
+      overview: string;
+      fitStatus: "Good Fit" | "Maybe" | "Poor Fit";
+      fitRationale: string;
+    }[] = [];
 
-    for (
-      let i = 0;
-      i < inputData.discoveredCompanies.length;
-      i += batchSize
-    ) {
+    for (let i = 0; i < inputData.discoveredCompanies.length; i += batchSize) {
       const batch = inputData.discoveredCompanies.slice(i, i + batchSize);
       logger?.info(
         `📝 [Step 4] Generating overviews for batch ${Math.floor(i / batchSize) + 1} (${batch.length} companies)`,
@@ -360,6 +394,9 @@ const generateOverviewsStep = createStep({
           ...batch.map((c) => ({
             ...c,
             overview: `${c.name} is a life sciences company located in the San Francisco Bay Area.`,
+            fitStatus: "Maybe",
+            fitRationale:
+              "Overview-generation fallback used due to model failure for this batch.",
           })),
         );
         continue;
@@ -388,7 +425,7 @@ const generateOverviewsStep = createStep({
 const writeResultsStep = createStep({
   id: "write-results",
   description:
-    "Writes all discovered companies with overviews to the prospectDiscovery tab in Google Sheets.",
+    "Writes all qualified companies with overviews to the Results tab in Google Sheets and appends run stats to Run Log.",
 
   inputSchema: z.object({
     spreadsheetId: z.string(),
@@ -397,6 +434,8 @@ const writeResultsStep = createStep({
         name: z.string(),
         website: z.string(),
         overview: z.string(),
+        fitStatus: z.enum(["Good Fit", "Maybe", "Poor Fit"]),
+        fitRationale: z.string(),
       }),
     ),
     stats: z.object({
@@ -425,6 +464,20 @@ const writeResultsStep = createStep({
       logger?.info(
         "📊 [Step 5] No companies to write, discovery produced no results",
       );
+
+      await appendSheetRows(inputData.spreadsheetId, SHEET_TABS.runLog, [
+        [
+          new Date().toISOString(),
+          inputData.spreadsheetId,
+          String(inputData.stats.totalIterations),
+          String(inputData.stats.totalDiscovered),
+          String(inputData.stats.totalDuplicatesRemoved),
+          String(inputData.stats.totalOutOfTerritory),
+          "0",
+          "Discovery completed but no companies were qualified for output.",
+        ],
+      ]);
+
       return {
         summary:
           "Discovery completed but no new companies were found in the territory.",
@@ -454,6 +507,19 @@ const writeResultsStep = createStep({
 - Out of territory: ${inputData.stats.totalOutOfTerritory}
 - Rows written to sheet: ${writeResult.rowsWritten}
 - Sheet URL: ${writeResult.spreadsheetUrl}`;
+
+    await appendSheetRows(inputData.spreadsheetId, SHEET_TABS.runLog, [
+      [
+        new Date().toISOString(),
+        inputData.spreadsheetId,
+        String(inputData.stats.totalIterations),
+        String(inputData.stats.totalDiscovered),
+        String(inputData.stats.totalDuplicatesRemoved),
+        String(inputData.stats.totalOutOfTerritory),
+        String(writeResult.rowsWritten),
+        summary,
+      ],
+    ]);
 
     logger?.info(`\n${summary}`);
 
