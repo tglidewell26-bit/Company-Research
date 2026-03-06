@@ -1,11 +1,16 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { loadSheet, createSpreadsheet } from "./googleSheets";
+import {
+  DEFAULT_SPREADSHEET_ID,
+  SHEET_TAB_ALIASES,
+  SHEET_TABS,
+} from "./sheetConfig";
 
 export const loadExclusionListsTool = createTool({
   id: "load-exclusion-lists",
   description:
-    "Loads the excludedCompanies and startingList tabs from the configured Google Sheet. Creates a new spreadsheet if none is configured.",
+    "Loads the ignored and existing company tabs from the configured Google Sheet. Creates a new spreadsheet if none is configured.",
 
   inputSchema: z.object({}),
 
@@ -29,9 +34,9 @@ export const loadExclusionListsTool = createTool({
     const logger = context?.mastra?.getLogger();
     logger?.info("📋 [loadExclusionLists] Starting to load exclusion data");
 
-    let spreadsheetId = process.env.GOOGLE_SHEET_ID;
+    let spreadsheetId = process.env.GOOGLE_SHEET_ID || DEFAULT_SPREADSHEET_ID;
 
-    if (!spreadsheetId) {
+    if (!spreadsheetId?.trim()) {
       logger?.info(
         "📋 [loadExclusionLists] No GOOGLE_SHEET_ID set, creating new spreadsheet",
       );
@@ -43,29 +48,39 @@ export const loadExclusionListsTool = createTool({
       );
     }
 
-    let excludedRows: string[][] = [];
-    try {
-      excludedRows = await loadSheet(spreadsheetId, "excludedCompanies");
-      logger?.info(
-        `📋 [loadExclusionLists] Loaded ${excludedRows.length} rows from excludedCompanies`,
-      );
-    } catch (err) {
-      logger?.warn(
-        "📋 [loadExclusionLists] Could not load excludedCompanies tab, using empty list",
-      );
-    }
+    const loadFirstAvailableTab = async (
+      aliases: readonly string[],
+      kind: string,
+    ): Promise<string[][]> => {
+      for (const tabName of aliases) {
+        try {
+          const rows = await loadSheet(spreadsheetId, tabName);
+          logger?.info(
+            `📋 [loadExclusionLists] Loaded ${rows.length} rows from ${tabName} for ${kind}`,
+          );
+          return rows;
+        } catch {
+          logger?.info(
+            `📋 [loadExclusionLists] Tab ${tabName} unavailable for ${kind}, trying next alias`,
+          );
+        }
+      }
 
-    let startingRows: string[][] = [];
-    try {
-      startingRows = await loadSheet(spreadsheetId, "startingList");
-      logger?.info(
-        `📋 [loadExclusionLists] Loaded ${startingRows.length} rows from startingList`,
-      );
-    } catch (err) {
       logger?.warn(
-        "📋 [loadExclusionLists] Could not load startingList tab, using empty list",
+        `📋 [loadExclusionLists] No available tab found for ${kind}, using empty list`,
       );
-    }
+      return [];
+    };
+
+    const excludedRows = await loadFirstAvailableTab(
+      SHEET_TAB_ALIASES.ignoredCompanies,
+      SHEET_TABS.ignoredCompanies,
+    );
+
+    const startingRows = await loadFirstAvailableTab(
+      SHEET_TAB_ALIASES.existingCompanies,
+      SHEET_TABS.existingCompanies,
+    );
 
     const parseRows = (rows: string[][]) => {
       const hasHeader =

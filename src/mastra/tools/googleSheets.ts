@@ -106,17 +106,49 @@ export async function writeSheet(
   });
 }
 
-export async function createSpreadsheet(
-  title: string,
-): Promise<string> {
+export async function appendSheetRows(
+  spreadsheetId: string,
+  tabName: string,
+  rows: string[][],
+): Promise<void> {
+  if (rows.length === 0) {
+    return;
+  }
+
+  const sheets = await getUncachableGoogleSheetClient();
+  const sheetMeta = await sheets.spreadsheets.get({ spreadsheetId });
+  const existingTab = sheetMeta.data.sheets?.find(
+    (s) => s.properties?.title === tabName,
+  );
+
+  if (!existingTab) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: tabName } } }],
+      },
+    });
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: tabName,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: rows },
+  });
+}
+
+export async function createSpreadsheet(title: string): Promise<string> {
   const sheets = await getUncachableGoogleSheetClient();
   const response = await sheets.spreadsheets.create({
     requestBody: {
       properties: { title },
       sheets: [
-        { properties: { title: "excludedCompanies" } },
-        { properties: { title: "startingList" } },
-        { properties: { title: "prospectDiscovery" } },
+        { properties: { title: "Ignored Companies" } },
+        { properties: { title: "Existing Companies" } },
+        { properties: { title: "Results" } },
+        { properties: { title: "Run Log" } },
       ],
     },
   });
@@ -125,7 +157,7 @@ export async function createSpreadsheet(
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: "excludedCompanies!A1:B1",
+    range: "Ignored Companies!A1:B1",
     valueInputOption: "RAW",
     requestBody: {
       values: [["Company Name", "Website"]],
@@ -134,7 +166,7 @@ export async function createSpreadsheet(
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: "startingList!A1:B1",
+    range: "Existing Companies!A1:B1",
     valueInputOption: "RAW",
     requestBody: {
       values: [["Company Name", "Website"]],
@@ -143,10 +175,30 @@ export async function createSpreadsheet(
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: "prospectDiscovery!A1:D1",
+    range: "Results!A1:D1",
     valueInputOption: "RAW",
     requestBody: {
       values: [["Company Name", "Company Website", "Overview", "Notes"]],
+    },
+  });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: "Run Log!A1:H1",
+    valueInputOption: "RAW",
+    requestBody: {
+      values: [
+        [
+          "Timestamp",
+          "Spreadsheet ID",
+          "Iterations",
+          "Discovered",
+          "Duplicates Removed",
+          "Out of Territory",
+          "Rows Written",
+          "Summary",
+        ],
+      ],
     },
   });
 
