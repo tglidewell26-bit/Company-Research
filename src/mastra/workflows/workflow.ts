@@ -1,203 +1,486 @@
-// Use Inngest-compatible versions for this project
-// These are initialized with init(inngest) to work with the Inngest workflow engine
 import { createStep, createWorkflow } from "../inngest";
 import { z } from "zod";
-import { automationAgent } from "../agents/agent";
+import { loadExclusionListsTool } from "../tools/loadExclusionLists";
+import { validateCompanyWebsiteTool } from "../tools/validateCompany";
+import { geocodeAndValidateTerritoryTool } from "../tools/geocoder";
+import { discoverCompaniesTool } from "../tools/discoverCompanies";
+import { deduplicateCompaniesTool } from "../tools/deduplicator";
+import { generateOverviewTool } from "../tools/overviewGenerator";
+import { writeProspectsTool } from "../tools/writeProspects";
 
-/**
- * Mastra Workflow with Mocked Steps
- *
- * MASTRA WORKFLOW GUIDE:
- * - Workflows orchestrate multiple steps in sequence
- * - Each step has typed inputs/outputs for reliability
- * - Steps can use agents, tools, or custom logic (conditionals, loops, etc)
- */
+const companySchema = z.object({
+  name: z.string(),
+  website: z.string(),
+});
 
-/**
- * CALLING TOOLS IN WORKFLOW STEPS:
- * When calling tool.execute() in a step, you must narrow the return type before accessing properties.
- * tool.execute() returns `ValidationError | OutputType`, so check for errors first:
- *
- *     const result = await myTool.execute(input, { mastra });
- *     if ('error' in result && result.error) throw new Error(result.message);
- *     return { data: result.someProperty }; // Now typed correctly
- *
- * Note: Don't use `error` as a field name in tool output schemas (reserved for ValidationError).
- * Note: Step chaining with .then() requires `as any` casts due to Inngest type inference (see below).
- */
-
-/**
- * Step 1: Process with Agent
- * This step demonstrates how to use an agent within a workflow
- */
-const processWithAgent = createStep({
-  id: "process-with-agent",
+const loadExclusionData = createStep({
+  id: "load-exclusion-data",
   description:
-    "Processes the input message using an AI agent with optional analysis", // Must contain a clear, concise description of what the step does.
+    "Loads excluded companies and starting list from Google Sheets. Creates a new spreadsheet if none is configured.",
 
-  // Define what this step expects as input
-  inputSchema: z.object({
-    message: z.string().describe("Message to process"),
-    includeAnalysis: z
-      .boolean()
-      .optional()
-      .describe("Whether to include detailed analysis"),
-  }),
+  inputSchema: z.object({}),
 
-  // Defines what this step will output. Must match the inputSchema of the next step.
   outputSchema: z.object({
-    agentResponse: z.string(),
-    processedData: z
-      .object({
-        original: z.string(),
-        processed: z.string(),
-        timestamp: z.string(),
-      })
-      .optional(),
+    spreadsheetId: z.string(),
+    excludedCompanies: z.array(companySchema),
+    startingList: z.array(companySchema),
+    dontSearch: z.array(companySchema),
   }),
 
-  // Step logic - mastra is available for logging and utilities
-  execute: async ({ inputData, mastra }) => {
+  execute: async ({ mastra }) => {
     const logger = mastra?.getLogger();
-    logger?.info("🚀 [Step 1] Processing with agent...");
+    logger?.info("📋 [Step 1] Loading exclusion data from Google Sheets...");
 
-    // Construct a prompt for the agent
-    const prompt = `
-      Please process the following message using the example tool:
-      "${inputData.message}"
+    const result = await loadExclusionListsTool.execute({}, { mastra });
+    if ("error" in result && result.error) {
+      throw new Error(`Failed to load exclusion lists: ${JSON.stringify(result)}`);
+    }
 
-      ${inputData.includeAnalysis ? "Also provide a brief analysis of the results." : ""}
-    `;
+    const dontSearch = [...result.excludedCompanies, ...result.startingList];
 
-    // Call the agent using generate or stream
-    const response = await automationAgent.generate(
-      [{ role: "user", content: prompt }],
-      // We can add other properties, for instance the thread id keeps track of the message history.  Check Mastra docs for more information.
+    logger?.info(
+      `📋 [Step 1] Loaded ${result.excludedCompanies.length} excluded + ${result.startingList.length} starting = ${dontSearch.length} total exclusions`,
     );
 
-    logger?.info("✅ [Step 1] Agent processing complete");
+    return {
+      spreadsheetId: result.spreadsheetId,
+      excludedCompanies: result.excludedCompanies,
+      startingList: result.startingList,
+      dontSearch,
+    };
+  },
+});
 
-    // In a real workflow, you might:
-    // - Parse structured data from the response
-    // - Extract specific information
-    // - Handle errors gracefully
+const validateStartingList = createStep({
+  id: "validate-starting-list",
+  description:
+    "Validates companies in the starting list by checking websites and territory location.",
+
+  inputSchema: z.object({
+    spreadsheetId: z.string(),
+    excludedCompanies: z.array(companySchema),
+    startingList: z.array(companySchema),
+    dontSearch: z.array(companySchema),
+  }),
+
+  outputSchema: z.object({
+    spreadsheetId: z.string(),
+    validatedStartingList: z.array(companySchema),
+    dontSearch: z.array(companySchema),
+    invalidCount: z.number(),
+  }),
+
+  execute: async ({ inputData, mastra }) => {
+    const logger = mastra?.getLogger();
+    logger?.info(
+      `🔍 [Step 2] Validating ${inputData.startingList.length} starting list companies...`,
+    );
+
+    if (inputData.startingList.length === 0) {
+      logger?.info("🔍 [Step 2] No starting list companies to validate");
+      return {
+        spreadsheetId: inputData.spreadsheetId,
+        validatedStartingList: [],
+        dontSearch: inputData.dontSearch,
+        invalidCount: 0,
+      };
+    }
+
+    const webResult = await validateCompanyWebsiteTool.execute(
+      { companies: inputData.startingList },
+      { mastra },
+    );
+    if ("error" in webResult && webResult.error) {
+      throw new Error(`Website validation failed: ${JSON.stringify(webResult)}`);
+    }
+
+    const aliveCompanies = webResult.validCompanies
+      .filter((c) => c.websiteAlive)
+      .map((c) => ({ name: c.name, website: c.website }));
+
+    logger?.info(
+      `🔍 [Step 2] ${aliveCompanies.length} companies have valid websites (${webResult.invalidCount} failed)`,
+    );
+
+    const validatedDontSearch = [
+      ...inputData.excludedCompanies,
+      ...aliveCompanies,
+    ];
 
     return {
-      agentResponse: response.text,
-      processedData: {
-        original: inputData.message,
-        processed: inputData.message.toUpperCase(), // Simple mock processing
-        timestamp: new Date().toISOString(),
+      spreadsheetId: inputData.spreadsheetId,
+      validatedStartingList: aliveCompanies,
+      dontSearch: validatedDontSearch,
+      invalidCount: webResult.invalidCount,
+    };
+  },
+});
+
+const runDiscoveryLoop = createStep({
+  id: "run-discovery-loop",
+  description:
+    "Iteratively discovers new biotech companies using AI search, deduplicates results, and validates territory. Stops after 3 consecutive iterations with no new companies.",
+
+  inputSchema: z.object({
+    spreadsheetId: z.string(),
+    validatedStartingList: z.array(companySchema),
+    dontSearch: z.array(companySchema),
+    invalidCount: z.number(),
+  }),
+
+  outputSchema: z.object({
+    spreadsheetId: z.string(),
+    discoveredCompanies: z.array(
+      z.object({
+        name: z.string(),
+        website: z.string(),
+      }),
+    ),
+    totalIterations: z.number(),
+    totalDuplicatesRemoved: z.number(),
+    totalOutOfTerritory: z.number(),
+  }),
+
+  execute: async ({ inputData, mastra }) => {
+    const logger = mastra?.getLogger();
+    logger?.info("🔄 [Step 3] Starting discovery loop...");
+
+    let dontSearch = [...inputData.dontSearch];
+    const allDiscovered: { name: string; website: string }[] = [];
+    let zeroRounds = 0;
+    let iteration = 0;
+    let totalDuplicatesRemoved = 0;
+    let totalOutOfTerritory = 0;
+    const maxIterations = 7;
+
+    while (zeroRounds < 3 && iteration < maxIterations) {
+      iteration++;
+      logger?.info(
+        `\n🔄 [Step 3] === Iteration ${iteration} (${zeroRounds} consecutive zero rounds) ===`,
+      );
+
+      const excludedNames = dontSearch.map((c) => c.name);
+
+      const discoveryResult = await discoverCompaniesTool.execute(
+        { excludedNames, batchNumber: iteration },
+        { mastra },
+      );
+      if ("error" in discoveryResult && discoveryResult.error) {
+        logger?.warn(
+          `⚠️ [Step 3] Discovery failed in iteration ${iteration}, skipping`,
+        );
+        zeroRounds++;
+        continue;
+      }
+
+      const discovered = discoveryResult.discoveredCompanies;
+      logger?.info(
+        `🔎 [Step 3] Iteration ${iteration}: Gemini returned ${discovered.length} companies`,
+      );
+
+      if (discovered.length === 0) {
+        zeroRounds++;
+        logger?.info(
+          `🔎 [Step 3] Iteration ${iteration}: No companies returned, zero round ${zeroRounds}/3`,
+        );
+        continue;
+      }
+
+      const dedupeResult = await deduplicateCompaniesTool.execute(
+        {
+          newCompanies: discovered.map((c) => ({
+            name: c.name,
+            website: c.website,
+          })),
+          existingCompanies: dontSearch,
+        },
+        { mastra },
+      );
+      if ("error" in dedupeResult && dedupeResult.error) {
+        logger?.warn(
+          `⚠️ [Step 3] Deduplication failed in iteration ${iteration}`,
+        );
+        zeroRounds++;
+        continue;
+      }
+
+      totalDuplicatesRemoved += dedupeResult.duplicatesRemoved;
+      logger?.info(
+        `🔄 [Step 3] Iteration ${iteration}: ${dedupeResult.duplicatesRemoved} duplicates removed, ${dedupeResult.uniqueCompanies.length} unique`,
+      );
+
+      if (dedupeResult.uniqueCompanies.length === 0) {
+        zeroRounds++;
+        logger?.info(
+          `🔄 [Step 3] Iteration ${iteration}: All duplicates, zero round ${zeroRounds}/3`,
+        );
+        continue;
+      }
+
+      const geoResult = await geocodeAndValidateTerritoryTool.execute(
+        {
+          companies: dedupeResult.uniqueCompanies.map((c) => ({
+            name: c.name,
+            website: c.website,
+            address: discovered.find((d) => d.name === c.name)?.address,
+          })),
+        },
+        { mastra },
+      );
+      if ("error" in geoResult && geoResult.error) {
+        logger?.warn(
+          `⚠️ [Step 3] Geocoding failed in iteration ${iteration}`,
+        );
+        zeroRounds++;
+        continue;
+      }
+
+      totalOutOfTerritory += geoResult.outOfTerritoryCount;
+      const validCompanies = geoResult.validCompanies
+        .filter((c) => c.inTerritory)
+        .map((c) => ({ name: c.name, website: c.website }));
+
+      logger?.info(
+        `📍 [Step 3] Iteration ${iteration}: ${validCompanies.length} companies validated in territory`,
+      );
+
+      if (validCompanies.length > 0) {
+        allDiscovered.push(...validCompanies);
+        dontSearch.push(...validCompanies);
+        zeroRounds = 0;
+        logger?.info(
+          `✅ [Step 3] Iteration ${iteration}: Added ${validCompanies.length} new companies (total: ${allDiscovered.length})`,
+        );
+      } else {
+        zeroRounds++;
+        logger?.info(
+          `🔄 [Step 3] Iteration ${iteration}: No valid companies, zero round ${zeroRounds}/3`,
+        );
+      }
+
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    logger?.info(
+      `\n🏁 [Step 3] Discovery loop complete after ${iteration} iterations`,
+    );
+    logger?.info(
+      `🏁 [Step 3] Total discovered: ${allDiscovered.length} companies`,
+    );
+    logger?.info(
+      `🏁 [Step 3] Total duplicates removed: ${totalDuplicatesRemoved}`,
+    );
+    logger?.info(
+      `🏁 [Step 3] Total out of territory: ${totalOutOfTerritory}`,
+    );
+
+    return {
+      spreadsheetId: inputData.spreadsheetId,
+      discoveredCompanies: allDiscovered,
+      totalIterations: iteration,
+      totalDuplicatesRemoved,
+      totalOutOfTerritory,
+    };
+  },
+});
+
+const generateOverviewsStep = createStep({
+  id: "generate-overviews",
+  description:
+    "Generates 5-sentence AI overviews for all discovered companies.",
+
+  inputSchema: z.object({
+    spreadsheetId: z.string(),
+    discoveredCompanies: z.array(companySchema),
+    totalIterations: z.number(),
+    totalDuplicatesRemoved: z.number(),
+    totalOutOfTerritory: z.number(),
+  }),
+
+  outputSchema: z.object({
+    spreadsheetId: z.string(),
+    companiesWithOverviews: z.array(
+      z.object({
+        name: z.string(),
+        website: z.string(),
+        overview: z.string(),
+      }),
+    ),
+    stats: z.object({
+      totalIterations: z.number(),
+      totalDuplicatesRemoved: z.number(),
+      totalOutOfTerritory: z.number(),
+      totalDiscovered: z.number(),
+    }),
+  }),
+
+  execute: async ({ inputData, mastra }) => {
+    const logger = mastra?.getLogger();
+    logger?.info(
+      `📝 [Step 4] Generating overviews for ${inputData.discoveredCompanies.length} companies...`,
+    );
+
+    if (inputData.discoveredCompanies.length === 0) {
+      logger?.info("📝 [Step 4] No companies to generate overviews for");
+      return {
+        spreadsheetId: inputData.spreadsheetId,
+        companiesWithOverviews: [],
+        stats: {
+          totalIterations: inputData.totalIterations,
+          totalDuplicatesRemoved: inputData.totalDuplicatesRemoved,
+          totalOutOfTerritory: inputData.totalOutOfTerritory,
+          totalDiscovered: 0,
+        },
+      };
+    }
+
+    const batchSize = 10;
+    const allResults: { name: string; website: string; overview: string }[] =
+      [];
+
+    for (
+      let i = 0;
+      i < inputData.discoveredCompanies.length;
+      i += batchSize
+    ) {
+      const batch = inputData.discoveredCompanies.slice(i, i + batchSize);
+      logger?.info(
+        `📝 [Step 4] Generating overviews for batch ${Math.floor(i / batchSize) + 1} (${batch.length} companies)`,
+      );
+
+      const result = await generateOverviewTool.execute(
+        { companies: batch },
+        { mastra },
+      );
+      if ("error" in result && result.error) {
+        logger?.warn(
+          `⚠️ [Step 4] Overview generation failed for batch, using fallback`,
+        );
+        allResults.push(
+          ...batch.map((c) => ({
+            ...c,
+            overview: `${c.name} is a life sciences company located in the San Francisco Bay Area.`,
+          })),
+        );
+        continue;
+      }
+
+      allResults.push(...result.companiesWithOverviews);
+    }
+
+    logger?.info(
+      `✅ [Step 4] Generated ${allResults.length} company overviews`,
+    );
+
+    return {
+      spreadsheetId: inputData.spreadsheetId,
+      companiesWithOverviews: allResults,
+      stats: {
+        totalIterations: inputData.totalIterations,
+        totalDuplicatesRemoved: inputData.totalDuplicatesRemoved,
+        totalOutOfTerritory: inputData.totalOutOfTerritory,
+        totalDiscovered: allResults.length,
       },
     };
   },
 });
 
-/**
- * Step 2: Output Results
- * This step demonstrates how to handle and output results
- */
-const outputResults = createStep({
-  id: "output-results",
+const writeResultsStep = createStep({
+  id: "write-results",
   description:
-    "Formats the agent's response and puts it in the form of a summary.", // Must contain a clear, concise description of what the step does.
+    "Writes all discovered companies with overviews to the prospectDiscovery tab in Google Sheets.",
 
-  // This step receives the output from the previous step
   inputSchema: z.object({
-    agentResponse: z.string(),
-    processedData: z
-      .object({
-        original: z.string(),
-        processed: z.string(),
-        timestamp: z.string(),
-      })
-      .optional(),
+    spreadsheetId: z.string(),
+    companiesWithOverviews: z.array(
+      z.object({
+        name: z.string(),
+        website: z.string(),
+        overview: z.string(),
+      }),
+    ),
+    stats: z.object({
+      totalIterations: z.number(),
+      totalDuplicatesRemoved: z.number(),
+      totalOutOfTerritory: z.number(),
+      totalDiscovered: z.number(),
+    }),
   }),
 
-  // Final output schema - this is what the workflow returns
   outputSchema: z.object({
     summary: z.string(),
-    formattedOutput: z.string(),
+    spreadsheetUrl: z.string(),
+    rowsWritten: z.number(),
     success: z.boolean(),
   }),
 
   execute: async ({ inputData, mastra }) => {
     const logger = mastra?.getLogger();
-    logger?.info("📤 [Step 2] Outputting results...");
+    logger?.info(
+      `📊 [Step 5] Writing ${inputData.companiesWithOverviews.length} companies to Google Sheet...`,
+    );
 
-    /**
-     * In a real workflow, this step might:
-     * - Send data to an API
-     * - Write to a database
-     * - Send an email
-     * - Update a UI
-     * - Trigger webhooks
-     * - Store in a file system
-     */
+    if (inputData.companiesWithOverviews.length === 0) {
+      const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${inputData.spreadsheetId}`;
+      logger?.info(
+        "📊 [Step 5] No companies to write, discovery produced no results",
+      );
+      return {
+        summary:
+          "Discovery completed but no new companies were found in the territory.",
+        spreadsheetUrl,
+        rowsWritten: 0,
+        success: true,
+      };
+    }
 
-    // For this example, we'll format and log the output
-    const formattedOutput = `
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 WORKFLOW RESULTS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const writeResult = await writeProspectsTool.execute(
+      {
+        spreadsheetId: inputData.spreadsheetId,
+        companies: inputData.companiesWithOverviews,
+      },
+      { mastra },
+    );
+    if ("error" in writeResult && writeResult.error) {
+      throw new Error(
+        `Failed to write prospects: ${JSON.stringify(writeResult)}`,
+      );
+    }
 
-🤖 Agent Response:
-${inputData.agentResponse}
+    const summary = `Territory Intelligence Discovery Complete!
+- Iterations: ${inputData.stats.totalIterations}
+- Companies discovered: ${inputData.stats.totalDiscovered}
+- Duplicates removed: ${inputData.stats.totalDuplicatesRemoved}
+- Out of territory: ${inputData.stats.totalOutOfTerritory}
+- Rows written to sheet: ${writeResult.rowsWritten}
+- Sheet URL: ${writeResult.spreadsheetUrl}`;
 
-📝 Processed Data:
-${
-  inputData.processedData
-    ? `
-  • Original: ${inputData.processedData.original}
-  • Processed: ${inputData.processedData.processed}
-  • Timestamp: ${inputData.processedData.timestamp}
-`
-    : "No processed data available"
-}
-`;
-
-    // Log the output using Mastra logger
-    logger?.info(formattedOutput);
-    logger?.info("✅ [Step 2] Results formatted and logged");
+    logger?.info(`\n${summary}`);
 
     return {
-      summary: `Successfully processed message with ${inputData.processedData?.original.length || 0} characters`,
-      formattedOutput,
+      summary,
+      spreadsheetUrl: writeResult.spreadsheetUrl,
+      rowsWritten: writeResult.rowsWritten,
       success: true,
     };
   },
 });
 
-/**
- * MASTRA STEPS:
- * Remember:  There are many ways of structing a workflow, including boolean operations (conditionals, etc), looping, etc.
- * Please read the Mastra docs as instructed for more information if you need to setup a complex workflow. Mastra comes with many powerful primitives to help you build workflows.
- * We critically chain our steps in order to accomplish the user's desired automation.
- */
+export const territoryDiscoveryWorkflow = createWorkflow({
+  id: "territory-discovery-workflow",
 
-/**
- * Create the workflow by chaining steps
- */
-export const automationWorkflow = createWorkflow({
-  id: "automation-workflow",
+  inputSchema: z.object({}) as any,
 
-  // Define the initial input schema for the entire workflow
-  inputSchema: z.object({
-    message: z.string().describe("Message to process through the workflow"),
-    includeAnalysis: z
-      .boolean()
-      .optional()
-      .describe("Whether to include detailed analysis"),
-  }) as any, // TS workaround: Inngest type system incompatibility with Zod schemas
-
-  // Define the final output schema (should match the last step's output)
   outputSchema: z.object({
     summary: z.string(),
-    formattedOutput: z.string(),
+    spreadsheetUrl: z.string(),
+    rowsWritten: z.number(),
     success: z.boolean(),
   }),
 })
-  // Chain your steps in order
-  .then(processWithAgent as any) // TS workaround: type inference issues with Inngest step chaining
-  .then(outputResults as any)
+  .then(loadExclusionData as any)
+  .then(validateStartingList as any)
+  .then(runDiscoveryLoop as any)
+  .then(generateOverviewsStep as any)
+  .then(writeResultsStep as any)
   .commit();
