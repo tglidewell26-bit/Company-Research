@@ -1,21 +1,27 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import { GoogleGenAI } from "@google/genai";
+import { DEFAULT_OPENAI_MODEL, hasOpenAIConfig, openAIChat } from "./aiClients";
 
-function getGeminiClient() {
-  return new GoogleGenAI({
-    apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY!,
-    httpOptions: {
-      apiVersion: "",
-      baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL!,
-    },
-  });
+type CompanyAssessment = {
+  name: string;
+  overview: string;
+  fitStatus: "Good Fit" | "Maybe" | "Poor Fit";
+  fitRationale: string;
+};
+
+function parseAssessments(text: string): CompanyAssessment[] {
+  const jsonMatch = text.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    throw new Error("Could not parse JSON array from OpenAI response");
+  }
+
+  return JSON.parse(jsonMatch[0]) as CompanyAssessment[];
 }
 
 export const generateOverviewTool = createTool({
   id: "generate-company-overview",
   description:
-    "Generates a 5-sentence company overview using Gemini AI for a qualified biotech company.",
+    "Uses ChatGPT to generate 5-sentence overviews and fit rationale for each company.",
 
   inputSchema: z.object({
     companies: z.array(
@@ -32,6 +38,8 @@ export const generateOverviewTool = createTool({
         name: z.string(),
         website: z.string(),
         overview: z.string(),
+        fitStatus: z.enum(["Good Fit", "Maybe", "Poor Fit"]),
+        fitRationale: z.string(),
       }),
     ),
   }),
@@ -39,67 +47,62 @@ export const generateOverviewTool = createTool({
   execute: async (inputData, context) => {
     const logger = context?.mastra?.getLogger();
     logger?.info(
-      `📝 [overviewGenerator] Generating overviews for ${inputData.companies.length} companies`,
+      `📝 [overviewGenerator] Generating overviews + fit logic for ${inputData.companies.length} companies using ${DEFAULT_OPENAI_MODEL}`,
     );
 
-    const ai = getGeminiClient();
+    if (!hasOpenAIConfig()) {
+      throw new Error(
+        "OPENAI_API_KEY is required for fit logic and overview generation. Set your real key in environment settings.",
+      );
+    }
 
     const companyList = inputData.companies
       .map((c, i) => `${i + 1}. "${c.name}" (website: ${c.website})`)
       .join("\n");
 
-    const prompt = `Generate a professional 5-sentence company overview for each of the following biotechnology, pharmaceutical, or CRO companies in the San Francisco Bay Area.
+    const prompt = `For each biotechnology/pharmaceutical/CRO company below, return:
+1) a factual 5-sentence overview,
+2) a fitStatus (Good Fit | Maybe | Poor Fit),
+3) a concise fitRationale explaining WHY the fit decision was made.
 
 Companies:
 ${companyList}
 
-For each company, the overview should cover:
-1. What the company does (core business focus)
-2. Their key technology or platform
-3. Their therapeutic areas or research focus
-4. Their location and any notable partnerships
-5. Their significance in the biotech industry
+Return ONLY valid JSON array with objects:
+{
+  "name": "exact input name",
+  "overview": "exactly 5 sentences",
+  "fitStatus": "Good Fit|Maybe|Poor Fit",
+  "fitRationale": "2-4 sentence rationale"
+}
 
-Return ONLY a JSON array where each element has "name" (exact company name as provided) and "overview" (exactly 5 sentences in a single paragraph). Be factual and professional. Example format:
-[{"name": "Company A", "overview": "Sentence 1. Sentence 2. Sentence 3. Sentence 4. Sentence 5."}]
-
-Return valid JSON only, no markdown formatting.`;
+No markdown. JSON only.`;
 
     try {
-      const result = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
+      const openAIText = await openAIChat(prompt);
+      const parsed = parseAssessments(openAIText);
+
+      const results = inputData.companies.map((company) => {
+        const found = parsed.find(
+          (p) => p.name.toLowerCase() === company.name.toLowerCase(),
+        );
+        return {
+          name: company.name,
+          website: company.website,
+          overview:
+            found?.overview ||
+            `${company.name} is a life sciences company located in the San Francisco Bay Area. The company is active in biotechnology-related research and development. Public information indicates it maintains operations relevant to therapeutic, diagnostic, or platform innovation. It appears to participate in the regional ecosystem of academic and industry partnerships. Additional diligence is recommended to confirm current pipeline priorities and commercial focus.`,
+          fitStatus: found?.fitStatus || "Maybe",
+          fitRationale:
+            found?.fitRationale ||
+            "Insufficient structured data was available from this run to produce a higher-confidence fit judgment.",
+        };
       });
 
-      const text = (result.text || "").trim();
-      const jsonMatch = text.match(/\[[\s\S]*\]/);
-
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]) as Array<{
-          name: string;
-          overview: string;
-        }>;
-
-        const results = inputData.companies.map((company) => {
-          const found = parsed.find(
-            (p) => p.name.toLowerCase() === company.name.toLowerCase(),
-          );
-          return {
-            name: company.name,
-            website: company.website,
-            overview:
-              found?.overview ||
-              `${company.name} is a life sciences company located in the San Francisco Bay Area.`,
-          };
-        });
-
-        logger?.info(
-          `✅ [overviewGenerator] Batch complete: ${results.length} overviews generated`,
-        );
-        return { companiesWithOverviews: results };
-      }
-
-      throw new Error("Could not parse JSON from Gemini response");
+      logger?.info(
+        `✅ [overviewGenerator] OpenAI batch complete: ${results.length} assessments generated`,
+      );
+      return { companiesWithOverviews: results };
     } catch (err) {
       logger?.error(
         `❌ [overviewGenerator] Batch failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -109,7 +112,10 @@ Return valid JSON only, no markdown formatting.`;
         companiesWithOverviews: inputData.companies.map((c) => ({
           name: c.name,
           website: c.website,
-          overview: `${c.name} is a life sciences company located in the San Francisco Bay Area.`,
+          overview: `${c.name} is a life sciences company located in the San Francisco Bay Area. The company is active in biotechnology-related research and development. Public information indicates it maintains operations relevant to therapeutic, diagnostic, or platform innovation. It appears to participate in the regional ecosystem of academic and industry partnerships. Additional diligence is recommended to confirm current pipeline priorities and commercial focus.`,
+          fitStatus: "Maybe" as const,
+          fitRationale:
+            "Assessment fallback used because OpenAI response could not be parsed during this run.",
         })),
       };
     }

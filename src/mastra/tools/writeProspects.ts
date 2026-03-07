@@ -1,11 +1,12 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { writeSheet } from "./googleSheets";
+import { SHEET_TAB_ALIASES, SHEET_TABS } from "./sheetConfig";
 
 export const writeProspectsTool = createTool({
   id: "write-prospects-to-sheet",
   description:
-    "Writes the qualified companies with overviews to the prospectDiscovery tab in the Google Sheet.",
+    "Writes qualified companies with ChatGPT-generated overviews and fit rationale to Results and legacy prospectDiscovery tabs.",
 
   inputSchema: z.object({
     spreadsheetId: z.string(),
@@ -14,6 +15,8 @@ export const writeProspectsTool = createTool({
         name: z.string(),
         website: z.string(),
         overview: z.string(),
+        fitStatus: z.enum(["Good Fit", "Maybe", "Poor Fit"]),
+        fitRationale: z.string(),
       }),
     ),
   }),
@@ -34,12 +37,21 @@ export const writeProspectsTool = createTool({
       company.name,
       company.website,
       company.overview,
-      "Discovered by Territory Intelligence Automation",
+      `[${company.fitStatus}] ${company.fitRationale}`,
     ]);
 
     const data = [header, ...rows];
 
-    await writeSheet(inputData.spreadsheetId, "prospectDiscovery", data);
+    await writeSheet(inputData.spreadsheetId, SHEET_TABS.results, data);
+
+    for (const aliasTab of SHEET_TAB_ALIASES.results) {
+      if (aliasTab !== SHEET_TABS.results) {
+        await writeSheet(inputData.spreadsheetId, aliasTab, data);
+        logger?.info(
+          `📊 [writeProspects] Mirrored output to legacy tab: ${aliasTab}`,
+        );
+      }
+    }
 
     const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${inputData.spreadsheetId}`;
 

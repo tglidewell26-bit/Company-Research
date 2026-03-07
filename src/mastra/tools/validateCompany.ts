@@ -4,7 +4,7 @@ import { z } from "zod";
 export const validateCompanyWebsiteTool = createTool({
   id: "validate-company-website",
   description:
-    "Validates whether a company website is alive by performing an HTTP check. Returns true if the site responds with a status code below 400.",
+    "Validates whether a company website is alive by performing an HTTP check.",
 
   inputSchema: z.object({
     companies: z.array(
