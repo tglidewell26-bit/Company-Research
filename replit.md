@@ -31,6 +31,7 @@ A Mastra-based automation that discovers, validates, and qualifies biotech, phar
 ## Workflow Pipeline
 
 1. **Load Exclusion Data** - Reads Ignored Companies and Existing Companies from Google Sheets (with legacy tab aliases)
+1b. **Deduplicate Starting List** - Removes companies matching the ignored list, then self-deduplicates using fuzzy name matching (92% threshold) to reduce the list before expensive website checks
 2. **Validate Starting List** - Checks websites and territory for starting list companies
 3. **Discovery Loop** - Up to 20 iterations by default (configurable via `MAX_DISCOVERY_ITERATIONS`) of AI discovery → dedup → geocode validation
 4. **Generate Overviews** - Batch ChatGPT calls for 5-sentence overviews + fit rationale
