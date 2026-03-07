@@ -39,7 +39,7 @@ A Mastra-based automation that discovers, validates, and qualifies biotech, phar
 
 ## Configuration
 
-- **Trigger**: Manual only (run from Playground or via API)
+- **Trigger**: Manual via Playground "Test Automation" button (cron registered for button support, defaults to Monday 8AM Pacific)
 - **Territory Bounding Box**: lat 37.35-37.81, lon -122.55 to -121.85
 - **Max Iterations**: 20 by default (override with `MAX_DISCOVERY_ITERATIONS`)
 - **Overview Batch Size**: 10 companies per ChatGPT call
