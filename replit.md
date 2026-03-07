@@ -35,7 +35,7 @@ A Mastra-based automation that discovers, validates, and qualifies biotech, phar
 2. **Validate Starting List** - Checks websites and territory for starting list companies
 3. **Discovery Loop** - Up to 20 iterations by default (configurable via `MAX_DISCOVERY_ITERATIONS`) of AI discovery → dedup → geocode validation
 4. **Generate Overviews** - Batch ChatGPT calls for 5-sentence overviews + fit rationale
-5. **Write Results** - Writes companies with overviews to Results tab and appends run metrics to Run Log
+5. **Write Results** - Writes companies with overviews to a new date-stamped tab (e.g., "Results 2026-03-07 08:00") and appends run metrics to Run Log
 
 ## Configuration
 

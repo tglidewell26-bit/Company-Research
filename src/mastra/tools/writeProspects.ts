@@ -1,12 +1,21 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { writeSheet } from "./googleSheets";
-import { SHEET_TAB_ALIASES, SHEET_TABS } from "./sheetConfig";
+
+function getDateStampedTabName(): string {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const min = String(now.getMinutes()).padStart(2, "0");
+  return `Results ${yyyy}-${mm}-${dd} ${hh}:${min}`;
+}
 
 export const writeProspectsTool = createTool({
   id: "write-prospects-to-sheet",
   description:
-    "Writes qualified companies with ChatGPT-generated overviews and fit rationale to Results and legacy prospectDiscovery tabs.",
+    "Writes qualified companies with ChatGPT-generated overviews and fit rationale to a new date-stamped Results tab in the original spreadsheet.",
 
   inputSchema: z.object({
     spreadsheetId: z.string(),
@@ -28,8 +37,9 @@ export const writeProspectsTool = createTool({
 
   execute: async (inputData, context) => {
     const logger = context?.mastra?.getLogger();
+    const tabName = getDateStampedTabName();
     logger?.info(
-      `📊 [writeProspects] Writing ${inputData.companies.length} companies to Google Sheet`,
+      `📊 [writeProspects] Writing ${inputData.companies.length} companies to tab "${tabName}"`,
     );
 
     const header = ["Company Name", "Company Website", "Overview", "Notes"];
@@ -42,21 +52,12 @@ export const writeProspectsTool = createTool({
 
     const data = [header, ...rows];
 
-    await writeSheet(inputData.spreadsheetId, SHEET_TABS.results, data);
-
-    for (const aliasTab of SHEET_TAB_ALIASES.results) {
-      if (aliasTab !== SHEET_TABS.results) {
-        await writeSheet(inputData.spreadsheetId, aliasTab, data);
-        logger?.info(
-          `📊 [writeProspects] Mirrored output to legacy tab: ${aliasTab}`,
-        );
-      }
-    }
+    await writeSheet(inputData.spreadsheetId, tabName, data);
 
     const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${inputData.spreadsheetId}`;
 
     logger?.info(
-      `✅ [writeProspects] Successfully wrote ${rows.length} companies to sheet`,
+      `✅ [writeProspects] Successfully wrote ${rows.length} companies to tab "${tabName}"`,
     );
     logger?.info(`📊 [writeProspects] Sheet URL: ${spreadsheetUrl}`);
 

@@ -69,3 +69,8 @@ waitForPort = 3000
 
 [workflows.workflow.metadata]
 outputType = "automations"
+
+[userenv]
+
+[userenv.shared]
+GOOGLE_SHEET_ID = "1qSkNpGmIdXRiU9gLafMYxgaBWBv4DanVc5dU6xZaseQ"
