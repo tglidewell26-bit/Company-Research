@@ -15,8 +15,8 @@ MASTRA_HIDE_CLOUD_CTA = "true"
 
 [deployment]
 build = ["bash", "scripts/build.sh"]
-run = ["sh", "-c", "cd .mastra/output && NODE_ENV=production node index.mjs"]
-deploymentTarget = "cloudrun"
+run = ["bash", "scripts/run.sh"]
+deploymentTarget = "vm"
 
 [[ports]]
 localPort = 3000
@@ -69,3 +69,8 @@ waitForPort = 3000
 
 [workflows.workflow.metadata]
 outputType = "automations"
+
+[userenv]
+
+[userenv.shared]
+GOOGLE_SHEET_ID = "1qSkNpGmIdXRiU9gLafMYxgaBWBv4DanVc5dU6xZaseQ"

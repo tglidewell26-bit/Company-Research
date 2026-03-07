@@ -3,7 +3,7 @@ import { z } from "zod";
 import { loadExclusionListsTool } from "../tools/loadExclusionLists";
 import { geocodeAndValidateTerritoryTool } from "../tools/geocoder";
 import { discoverCompaniesTool } from "../tools/discoverCompanies";
-import { deduplicateCompaniesTool } from "../tools/deduplicator";
+import { deduplicateCompaniesTool, isDuplicate } from "../tools/deduplicator";
 import { generateOverviewTool } from "../tools/overviewGenerator";
 import { writeProspectsTool } from "../tools/writeProspects";
 import { appendSheetRows } from "../tools/googleSheets";
@@ -54,6 +54,105 @@ const loadExclusionData = createStep({
   },
 });
 
+const deduplicateStartingList = createStep({
+  id: "deduplicate-starting-list",
+  description:
+    "Removes ignored companies from the existing list and deduplicates the remaining companies using fuzzy name matching (92% threshold). Runs before website validation to reduce the number of companies to check.",
+
+  inputSchema: z.object({
+    spreadsheetId: z.string(),
+    excludedCompanies: z.array(companySchema),
+    startingList: z.array(companySchema),
+    dontSearch: z.array(companySchema),
+  }),
+
+  outputSchema: z.object({
+    spreadsheetId: z.string(),
+    excludedCompanies: z.array(companySchema),
+    startingList: z.array(companySchema),
+    dontSearch: z.array(companySchema),
+    ignoredRemoved: z.number(),
+    duplicatesRemoved: z.number(),
+  }),
+
+  execute: async ({ inputData, mastra }) => {
+    const logger = mastra?.getLogger();
+    const originalCount = inputData.startingList.length;
+    logger?.info(
+      `🧹 [Step 1b] Deduplicating ${originalCount} existing companies...`,
+    );
+
+    let filtered = [...inputData.startingList];
+    let ignoredRemoved = 0;
+    const ignoredMatches: { name: string; matchedWith: string }[] = [];
+
+    for (let i = filtered.length - 1; i >= 0; i--) {
+      for (const ignored of inputData.excludedCompanies) {
+        if (isDuplicate(filtered[i].name, ignored.name, 92)) {
+          ignoredMatches.push({
+            name: filtered[i].name,
+            matchedWith: ignored.name,
+          });
+          filtered.splice(i, 1);
+          ignoredRemoved++;
+          break;
+        }
+      }
+    }
+
+    for (const match of ignoredMatches) {
+      logger?.info(
+        `🚫 [Step 1b] Removed ignored company: "${match.name}" (matched ignored: "${match.matchedWith}")`,
+      );
+    }
+
+    logger?.info(
+      `🚫 [Step 1b] Removed ${ignoredRemoved} companies matching the ignored list`,
+    );
+
+    const unique: { name: string; website: string }[] = [];
+    let duplicatesRemoved = 0;
+    const dupMatches: { name: string; matchedWith: string }[] = [];
+
+    for (const company of filtered) {
+      let isDup = false;
+      for (const accepted of unique) {
+        if (isDuplicate(company.name, accepted.name, 92)) {
+          dupMatches.push({
+            name: company.name,
+            matchedWith: accepted.name,
+          });
+          isDup = true;
+          duplicatesRemoved++;
+          break;
+        }
+      }
+      if (!isDup) {
+        unique.push(company);
+      }
+    }
+
+    for (const match of dupMatches) {
+      logger?.info(
+        `🔄 [Step 1b] Removed duplicate: "${match.name}" (matched: "${match.matchedWith}")`,
+      );
+    }
+
+    logger?.info(
+      `🧹 [Step 1b] Deduplication complete: ${originalCount} → ${unique.length} companies (${ignoredRemoved} ignored, ${duplicatesRemoved} duplicates removed)`,
+    );
+
+    return {
+      spreadsheetId: inputData.spreadsheetId,
+      excludedCompanies: inputData.excludedCompanies,
+      startingList: unique,
+      dontSearch: inputData.dontSearch,
+      ignoredRemoved,
+      duplicatesRemoved,
+    };
+  },
+});
+
 const validateStartingList = createStep({
   id: "validate-starting-list",
   description:
@@ -64,6 +163,8 @@ const validateStartingList = createStep({
     excludedCompanies: z.array(companySchema),
     startingList: z.array(companySchema),
     dontSearch: z.array(companySchema),
+    ignoredRemoved: z.number(),
+    duplicatesRemoved: z.number(),
   }),
 
   outputSchema: z.object({
@@ -500,6 +601,7 @@ export const territoryDiscoveryWorkflow = createWorkflow({
   }),
 })
   .then(loadExclusionData as any)
+  .then(deduplicateStartingList as any)
   .then(validateStartingList as any)
   .then(runDiscoveryLoop as any)
   .then(generateOverviewsStep as any)
