@@ -9,14 +9,8 @@ import { z } from "zod";
 import { sharedPostgresStorage } from "./storage";
 import { inngest, inngestServe } from "./inngest";
 
-import { registerCronTrigger } from "../triggers/cronTriggers";
 import { territoryDiscoveryWorkflow } from "./workflows/workflow";
 import { territoryIntelligenceAgent } from "./agents/agent";
-
-registerCronTrigger({
-  cronExpression: process.env.SCHEDULE_CRON_EXPRESSION || "0 15 * * 1",
-  workflow: territoryDiscoveryWorkflow,
-});
 
 class ProductionPinoLogger extends MastraLogger {
   protected logger: pino.Logger;
