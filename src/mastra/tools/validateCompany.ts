@@ -25,7 +25,7 @@ Return ONLY JSON like {"exists": true} or {"exists": false}.`;
 export const validateCompanyWebsiteTool = createTool({
   id: "validate-company-website",
   description:
-    "Validates whether a company website is alive by performing an HTTP check and confirms with Perplexity that the company still exists.",
+    "Validates whether a company website is alive by performing an HTTP check.",
 
   inputSchema: z.object({
     companies: z.array(

@@ -1,6 +1,7 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { writeSheet } from "./googleSheets";
+import { SHEET_TAB_ALIASES, SHEET_TABS } from "./sheetConfig";
 
 function getDateStampedTabName(): string {
   const now = new Date();
@@ -15,7 +16,7 @@ function getDateStampedTabName(): string {
 export const writeProspectsTool = createTool({
   id: "write-prospects-to-sheet",
   description:
-    "Writes qualified companies with ChatGPT-generated overviews and fit rationale to a new date-stamped Results tab in the original spreadsheet.",
+    "Writes qualified companies with ChatGPT-generated overviews and fit rationale to Results and legacy prospectDiscovery tabs.",
 
   inputSchema: z.object({
     spreadsheetId: z.string(),
@@ -52,7 +53,16 @@ export const writeProspectsTool = createTool({
 
     const data = [header, ...rows];
 
-    await writeSheet(inputData.spreadsheetId, tabName, data);
+    await writeSheet(inputData.spreadsheetId, SHEET_TABS.results, data);
+
+    for (const aliasTab of SHEET_TAB_ALIASES.results) {
+      if (aliasTab !== SHEET_TABS.results) {
+        await writeSheet(inputData.spreadsheetId, aliasTab, data);
+        logger?.info(
+          `📊 [writeProspects] Mirrored output to legacy tab: ${aliasTab}`,
+        );
+      }
+    }
 
     const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${inputData.spreadsheetId}`;
 

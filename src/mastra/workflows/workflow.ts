@@ -1,7 +1,6 @@
 import { createStep, createWorkflow } from "../inngest";
 import { z } from "zod";
 import { loadExclusionListsTool } from "../tools/loadExclusionLists";
-import { validateCompanyWebsiteTool } from "../tools/validateCompany";
 import { geocodeAndValidateTerritoryTool } from "../tools/geocoder";
 import { discoverCompaniesTool } from "../tools/discoverCompanies";
 import { deduplicateCompaniesTool, isDuplicate } from "../tools/deduplicator";
@@ -157,7 +156,7 @@ const deduplicateStartingList = createStep({
 const validateStartingList = createStep({
   id: "validate-starting-list",
   description:
-    "Validates companies in the starting list by checking websites and territory location.",
+    "Uses the Existing Companies tab as a pre-validated in-territory list and adds it directly to dontSearch.",
 
   inputSchema: z.object({
     spreadsheetId: z.string(),
@@ -178,59 +177,11 @@ const validateStartingList = createStep({
   execute: async ({ inputData, mastra }) => {
     const logger = mastra?.getLogger();
     logger?.info(
-      `🔍 [Step 2] Validating ${inputData.startingList.length} starting list companies...`,
+      `🔍 [Step 2] Using ${inputData.startingList.length} existing companies as pre-validated`,
     );
 
-    if (inputData.startingList.length === 0) {
-      logger?.info("🔍 [Step 2] No starting list companies to validate");
-      return {
-        spreadsheetId: inputData.spreadsheetId,
-        validatedStartingList: [],
-        dontSearch: inputData.dontSearch,
-        invalidCount: 0,
-      };
-    }
-
-    const webResult = await validateCompanyWebsiteTool.execute(
-      { companies: inputData.startingList },
-      { mastra },
-    );
-    if ("error" in webResult && webResult.error) {
-      throw new Error(
-        `Website validation failed: ${JSON.stringify(webResult)}`,
-      );
-    }
-
-    const aliveCompanies = webResult.validCompanies
-      .filter((c) => c.websiteAlive && c.companyExists)
-      .map((c) => ({ name: c.name, website: c.website }));
-
-    logger?.info(
-      `🔍 [Step 2] ${aliveCompanies.length} companies passed website + existence checks (${webResult.invalidCount} failed)`,
-    );
-
-    const geoResult = await geocodeAndValidateTerritoryTool.execute(
-      {
-        companies: aliveCompanies.map((company) => ({
-          name: company.name,
-          website: company.website,
-        })),
-      },
-      { mastra },
-    );
-
-    if ("error" in geoResult && geoResult.error) {
-      throw new Error(
-        `Territory validation failed for starting list: ${JSON.stringify(geoResult)}`,
-      );
-    }
-
-    const validatedStartingList = geoResult.validCompanies
-      .filter((c) => c.inTerritory)
-      .map((c) => ({ name: c.name, website: c.website }));
-
-    logger?.info(
-      `📍 [Step 2] ${validatedStartingList.length} existing companies are in territory (${geoResult.outOfTerritoryCount} out, ${geoResult.geocodeFailCount} geocode failed)`,
+    const validatedStartingList = inputData.startingList.filter((c) =>
+      c.name?.trim(),
     );
 
     const validatedDontSearch = [
@@ -238,11 +189,15 @@ const validateStartingList = createStep({
       ...validatedStartingList,
     ];
 
+    logger?.info(
+      `🔍 [Step 2] Added ${validatedStartingList.length} existing companies to dontSearch without website/geocode re-validation`,
+    );
+
     return {
       spreadsheetId: inputData.spreadsheetId,
       validatedStartingList,
       dontSearch: validatedDontSearch,
-      invalidCount: webResult.invalidCount,
+      invalidCount: 0,
     };
   },
 });

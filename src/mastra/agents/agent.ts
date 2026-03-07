@@ -30,7 +30,7 @@ Your primary responsibilities:
 Territory boundaries:
 - Geographic area: San Francisco to Mountain View, CA
 - Includes: San Francisco, South San Francisco, Daly City, Brisbane, San Bruno, Millbrae, Burlingame, San Mateo, Foster City, Belmont, San Carlos, Redwood City, Menlo Park, Palo Alto, Mountain View
-- Bounding box: lat 37.35-37.81, lon -122.55 to -121.85
+- Bounding box: lat 37.371991094843196-37.80937112865491, lon -122.50734140121014 to -122.00197621196642
 
 When discovering companies:
 - Focus on real, currently operating companies

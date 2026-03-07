@@ -2,10 +2,10 @@ import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 
 const TERRITORY_BOUNDS = {
-  lat_min: 37.35,
-  lat_max: 37.81,
-  lon_min: -122.55,
-  lon_max: -121.85,
+  lat_min: 37.371991094843196,
+  lat_max: 37.80937112865491,
+  lon_min: -122.50734140121014,
+  lon_max: -122.00197621196642,
 };
 
 async function geocodeAddress(
