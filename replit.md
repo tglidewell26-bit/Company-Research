@@ -48,7 +48,7 @@ A Mastra-based automation that discovers, validates, and qualifies biotech, phar
 
 ## Environment Variables
 
-- `GOOGLE_SHEET_ID` - Set to `1qSkNpGmIdXRiU9gLafMYxgaBWBv4DanVc5dU6xZaseQ`
+- `GOOGLE_SHEET_ID` - Set to `1khSAu8FDWpAXbXZBUVxu2JLFh6zlE9TOyrfU8ahnSvI`
 - `MAX_DISCOVERY_ITERATIONS` - Optional; defaults to `10`
 - `PERPLEXITY_API_KEY` / `PERPLEXITY_MODEL` - Required for discovery (`sonar-pro` default)
 - `OPENAI_API_KEY` / `OPENAI_MODEL` - Required for fit logic and overview generation (`gpt-5.4` default)
