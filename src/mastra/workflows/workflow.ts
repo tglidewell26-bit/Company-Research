@@ -5,8 +5,7 @@ import { geocodeAndValidateTerritoryTool } from "../tools/geocoder";
 import { discoverCompaniesTool } from "../tools/discoverCompanies";
 import { deduplicateCompaniesTool, isDuplicate } from "../tools/deduplicator";
 import { generateOverviewTool } from "../tools/overviewGenerator";
-import { writeProspectsTool } from "../tools/writeProspects";
-import { appendSheetRows } from "../tools/googleSheets";
+import { appendSheetRows, writeSheet } from "../tools/googleSheets";
 import { SHEET_TABS } from "../tools/sheetConfig";
 
 const WORKFLOW_TIMEOUT_MS = 60 * 60 * 1000;
@@ -259,7 +258,9 @@ const runDiscoveryLoop = createStep({
     logger?.info("🔄 [Step 3] Starting discovery loop...");
 
     let dontSearch = [...inputData.dontSearch];
-    const allDiscovered: { name: string; website: string }[] = [];
+    const allDiscovered: { name: string; website: string }[] = [
+      ...inputData.validatedStartingList,
+    ];
     let zeroRounds = 0;
     let iteration = 0;
     let totalDuplicatesRemoved = 0;
@@ -398,10 +399,10 @@ const runDiscoveryLoop = createStep({
   },
 });
 
-const generateOverviewsStep = createStep({
-  id: "generate-overviews",
+const processAndWriteStep = createStep({
+  id: "process-and-write",
   description:
-    "Generates 5-sentence AI overviews for all discovered companies.",
+    "Generates overviews in batches of 5 and writes each batch to Google Sheets immediately, so data is saved progressively rather than all at once.",
 
   inputSchema: z.object({
     spreadsheetId: z.string(),
@@ -409,130 +410,6 @@ const generateOverviewsStep = createStep({
     totalIterations: z.number(),
     totalDuplicatesRemoved: z.number(),
     totalOutOfTerritory: z.number(),
-    workflowStartTime: z.number(),
-  }),
-
-  outputSchema: z.object({
-    spreadsheetId: z.string(),
-    companiesWithOverviews: z.array(
-      z.object({
-        name: z.string(),
-        website: z.string(),
-        overview: z.string(),
-        fitStatus: z.enum(["Good Fit", "Maybe", "Poor Fit"]),
-        fitRationale: z.string(),
-      }),
-    ),
-    stats: z.object({
-      totalIterations: z.number(),
-      totalDuplicatesRemoved: z.number(),
-      totalOutOfTerritory: z.number(),
-      totalDiscovered: z.number(),
-    }),
-    workflowStartTime: z.number(),
-  }),
-
-  execute: async ({ inputData, mastra }) => {
-    const logger = mastra?.getLogger();
-    checkTimeout(inputData.workflowStartTime, "Step 4 - Overview generation start", logger);
-    logger?.info(
-      `📝 [Step 4] Generating overviews for ${inputData.discoveredCompanies.length} companies...`,
-    );
-
-    if (inputData.discoveredCompanies.length === 0) {
-      logger?.info("📝 [Step 4] No companies to generate overviews for");
-      return {
-        spreadsheetId: inputData.spreadsheetId,
-        companiesWithOverviews: [],
-        stats: {
-          totalIterations: inputData.totalIterations,
-          totalDuplicatesRemoved: inputData.totalDuplicatesRemoved,
-          totalOutOfTerritory: inputData.totalOutOfTerritory,
-          totalDiscovered: 0,
-        },
-        workflowStartTime: inputData.workflowStartTime,
-      };
-    }
-
-    const batchSize = 5;
-    const allResults: {
-      name: string;
-      website: string;
-      overview: string;
-      fitStatus: "Good Fit" | "Maybe" | "Poor Fit";
-      fitRationale: string;
-    }[] = [];
-
-    for (let i = 0; i < inputData.discoveredCompanies.length; i += batchSize) {
-      checkTimeout(inputData.workflowStartTime, `Step 4 - Overview batch ${Math.floor(i / batchSize) + 1}`, logger);
-      const batch = inputData.discoveredCompanies.slice(i, i + batchSize);
-      logger?.info(
-        `📝 [Step 4] Generating overviews for batch ${Math.floor(i / batchSize) + 1} (${batch.length} companies)`,
-      );
-
-      const result = await generateOverviewTool.execute(
-        { companies: batch },
-        { mastra },
-      );
-      if ("error" in result && result.error) {
-        logger?.warn(
-          `⚠️ [Step 4] Overview generation failed for batch, using fallback`,
-        );
-        allResults.push(
-          ...batch.map((c) => ({
-            ...c,
-            overview: `${c.name} is a life sciences company located in the San Francisco Bay Area.`,
-            fitStatus: "Maybe",
-            fitRationale:
-              "Overview-generation fallback used due to model failure for this batch.",
-          })),
-        );
-        continue;
-      }
-
-      allResults.push(...result.companiesWithOverviews);
-    }
-
-    logger?.info(
-      `✅ [Step 4] Generated ${allResults.length} company overviews`,
-    );
-
-    return {
-      spreadsheetId: inputData.spreadsheetId,
-      companiesWithOverviews: allResults,
-      stats: {
-        totalIterations: inputData.totalIterations,
-        totalDuplicatesRemoved: inputData.totalDuplicatesRemoved,
-        totalOutOfTerritory: inputData.totalOutOfTerritory,
-        totalDiscovered: allResults.length,
-      },
-      workflowStartTime: inputData.workflowStartTime,
-    };
-  },
-});
-
-const writeResultsStep = createStep({
-  id: "write-results",
-  description:
-    "Writes all qualified companies with overviews to the Results tab in Google Sheets and appends run stats to Run Log.",
-
-  inputSchema: z.object({
-    spreadsheetId: z.string(),
-    companiesWithOverviews: z.array(
-      z.object({
-        name: z.string(),
-        website: z.string(),
-        overview: z.string(),
-        fitStatus: z.enum(["Good Fit", "Maybe", "Poor Fit"]),
-        fitRationale: z.string(),
-      }),
-    ),
-    stats: z.object({
-      totalIterations: z.number(),
-      totalDuplicatesRemoved: z.number(),
-      totalOutOfTerritory: z.number(),
-      totalDiscovered: z.number(),
-    }),
     workflowStartTime: z.number(),
   }),
 
@@ -545,69 +422,86 @@ const writeResultsStep = createStep({
 
   execute: async ({ inputData, mastra }) => {
     const logger = mastra?.getLogger();
-    checkTimeout(inputData.workflowStartTime, "Step 5 - Write results", logger);
-    logger?.info(
-      `📊 [Step 5] Writing ${inputData.companiesWithOverviews.length} companies to Google Sheet...`,
-    );
+    checkTimeout(inputData.workflowStartTime, "Step 4 - Process and write", logger);
 
-    if (inputData.companiesWithOverviews.length === 0) {
-      const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${inputData.spreadsheetId}`;
-      logger?.info(
-        "📊 [Step 5] No companies to write, discovery produced no results",
-      );
+    const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${inputData.spreadsheetId}`;
 
+    if (inputData.discoveredCompanies.length === 0) {
+      logger?.info("📊 [Step 4] No companies to process");
       await appendSheetRows(inputData.spreadsheetId, SHEET_TABS.runLog, [
         [
           new Date().toISOString(),
           inputData.spreadsheetId,
-          String(inputData.stats.totalIterations),
-          String(inputData.stats.totalDiscovered),
-          String(inputData.stats.totalDuplicatesRemoved),
-          String(inputData.stats.totalOutOfTerritory),
+          String(inputData.totalIterations),
+          "0",
+          String(inputData.totalDuplicatesRemoved),
+          String(inputData.totalOutOfTerritory),
           "0",
           "Discovery completed but no companies were qualified for output.",
         ],
       ]);
-
       return {
-        summary:
-          "Discovery completed but no new companies were found in the territory.",
+        summary: "Discovery completed but no new companies were found in the territory.",
         spreadsheetUrl,
         rowsWritten: 0,
         success: true,
       };
     }
 
-    const writeResult = await writeProspectsTool.execute(
-      {
-        spreadsheetId: inputData.spreadsheetId,
-        companies: inputData.companiesWithOverviews,
-      },
-      { mastra },
+    // Build a single date-stamped tab name for this run
+    const now = new Date();
+    const tabName = `Results ${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    const header = ["Company Name", "Company Website", "Overview", "Notes"];
+
+    // Write just the header row to both tabs before the loop
+    await writeSheet(inputData.spreadsheetId, tabName, [header]);
+    await writeSheet(inputData.spreadsheetId, SHEET_TABS.results, [header]);
+    logger?.info(
+      `📊 [Step 4] Initialized tabs "${tabName}" and "${SHEET_TABS.results}" — processing ${inputData.discoveredCompanies.length} companies in batches of 5`,
     );
-    if ("error" in writeResult && writeResult.error) {
-      throw new Error(
-        `Failed to write prospects: ${JSON.stringify(writeResult)}`,
-      );
+
+    const batchSize = 5;
+    let rowsWritten = 0;
+    const totalBatches = Math.ceil(inputData.discoveredCompanies.length / batchSize);
+
+    for (let i = 0; i < inputData.discoveredCompanies.length; i += batchSize) {
+      const batchNum = Math.floor(i / batchSize) + 1;
+      checkTimeout(inputData.workflowStartTime, `Step 4 - Batch ${batchNum}/${totalBatches}`, logger);
+      const batch = inputData.discoveredCompanies.slice(i, i + batchSize);
+      logger?.info(`📝 [Step 4] Batch ${batchNum}/${totalBatches}: generating overviews for ${batch.length} companies`);
+
+      const result = await generateOverviewTool.execute({ companies: batch }, { mastra });
+
+      const rows = result.companiesWithOverviews.map((c) => [
+        c.name,
+        c.website,
+        c.overview,
+        `[${c.fitStatus}] ${c.fitRationale}`,
+      ]);
+
+      await appendSheetRows(inputData.spreadsheetId, tabName, rows);
+      await appendSheetRows(inputData.spreadsheetId, SHEET_TABS.results, rows);
+      rowsWritten += rows.length;
+      logger?.info(`✅ [Step 4] Batch ${batchNum}/${totalBatches}: wrote ${rows.length} rows (${rowsWritten} total so far)`);
     }
 
     const summary = `Territory Intelligence Discovery Complete!
-- Iterations: ${inputData.stats.totalIterations}
-- Companies discovered: ${inputData.stats.totalDiscovered}
-- Duplicates removed: ${inputData.stats.totalDuplicatesRemoved}
-- Out of territory: ${inputData.stats.totalOutOfTerritory}
-- Rows written to sheet: ${writeResult.rowsWritten}
-- Sheet URL: ${writeResult.spreadsheetUrl}`;
+- Iterations: ${inputData.totalIterations}
+- Companies processed: ${rowsWritten}
+- Duplicates removed: ${inputData.totalDuplicatesRemoved}
+- Out of territory: ${inputData.totalOutOfTerritory}
+- Rows written to sheet: ${rowsWritten}
+- Sheet URL: ${spreadsheetUrl}`;
 
     await appendSheetRows(inputData.spreadsheetId, SHEET_TABS.runLog, [
       [
         new Date().toISOString(),
         inputData.spreadsheetId,
-        String(inputData.stats.totalIterations),
-        String(inputData.stats.totalDiscovered),
-        String(inputData.stats.totalDuplicatesRemoved),
-        String(inputData.stats.totalOutOfTerritory),
-        String(writeResult.rowsWritten),
+        String(inputData.totalIterations),
+        String(rowsWritten),
+        String(inputData.totalDuplicatesRemoved),
+        String(inputData.totalOutOfTerritory),
+        String(rowsWritten),
         summary,
       ],
     ]);
@@ -616,8 +510,8 @@ const writeResultsStep = createStep({
 
     return {
       summary,
-      spreadsheetUrl: writeResult.spreadsheetUrl,
-      rowsWritten: writeResult.rowsWritten,
+      spreadsheetUrl,
+      rowsWritten,
       success: true,
     };
   },
@@ -639,6 +533,5 @@ export const territoryDiscoveryWorkflow = createWorkflow({
   .then(deduplicateStartingList as any)
   .then(validateStartingList as any)
   .then(runDiscoveryLoop as any)
-  .then(generateOverviewsStep as any)
-  .then(writeResultsStep as any)
+  .then(processAndWriteStep as any)
   .commit();
