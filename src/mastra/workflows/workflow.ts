@@ -240,7 +240,13 @@ const runDiscoveryLoop = createStep({
 
   outputSchema: z.object({
     spreadsheetId: z.string(),
-    discoveredCompanies: z.array(
+    existingCompanies: z.array(
+      z.object({
+        name: z.string(),
+        website: z.string(),
+      }),
+    ),
+    newCompanies: z.array(
       z.object({
         name: z.string(),
         website: z.string(),
@@ -258,9 +264,7 @@ const runDiscoveryLoop = createStep({
     logger?.info("🔄 [Step 3] Starting discovery loop...");
 
     let dontSearch = [...inputData.dontSearch];
-    const allDiscovered: { name: string; website: string }[] = [
-      ...inputData.validatedStartingList,
-    ];
+    const newlyDiscovered: { name: string; website: string }[] = [];
     let zeroRounds = 0;
     let iteration = 0;
     let totalDuplicatesRemoved = 0;
@@ -361,11 +365,11 @@ const runDiscoveryLoop = createStep({
       );
 
       if (validCompanies.length > 0) {
-        allDiscovered.push(...validCompanies);
+        newlyDiscovered.push(...validCompanies);
         dontSearch.push(...validCompanies);
         zeroRounds = 0;
         logger?.info(
-          `✅ [Step 3] Iteration ${iteration}: Added ${validCompanies.length} new companies (total: ${allDiscovered.length})`,
+          `✅ [Step 3] Iteration ${iteration}: Added ${validCompanies.length} new companies (total new: ${newlyDiscovered.length})`,
         );
       } else {
         zeroRounds++;
@@ -381,7 +385,7 @@ const runDiscoveryLoop = createStep({
       `\n🏁 [Step 3] Discovery loop complete after ${iteration} iterations`,
     );
     logger?.info(
-      `🏁 [Step 3] Total final qualified list: ${allDiscovered.length} companies (existing + newly discovered)`,
+      `🏁 [Step 3] Existing companies: ${inputData.validatedStartingList.length}, Newly discovered: ${newlyDiscovered.length}`,
     );
     logger?.info(
       `🏁 [Step 3] Total duplicates removed: ${totalDuplicatesRemoved}`,
@@ -390,7 +394,8 @@ const runDiscoveryLoop = createStep({
 
     return {
       spreadsheetId: inputData.spreadsheetId,
-      discoveredCompanies: allDiscovered,
+      existingCompanies: inputData.validatedStartingList,
+      newCompanies: newlyDiscovered,
       totalIterations: iteration,
       totalDuplicatesRemoved,
       totalOutOfTerritory,
@@ -406,7 +411,8 @@ const processAndWriteStep = createStep({
 
   inputSchema: z.object({
     spreadsheetId: z.string(),
-    discoveredCompanies: z.array(companySchema),
+    existingCompanies: z.array(companySchema),
+    newCompanies: z.array(companySchema),
     totalIterations: z.number(),
     totalDuplicatesRemoved: z.number(),
     totalOutOfTerritory: z.number(),
@@ -425,8 +431,9 @@ const processAndWriteStep = createStep({
     checkTimeout(inputData.workflowStartTime, "Step 4 - Process and write", logger);
 
     const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${inputData.spreadsheetId}`;
+    const totalInput = inputData.existingCompanies.length + inputData.newCompanies.length;
 
-    if (inputData.discoveredCompanies.length === 0) {
+    if (totalInput === 0) {
       logger?.info("📊 [Step 4] No companies to process");
       await appendSheetRows(inputData.spreadsheetId, SHEET_TABS.runLog, [
         [
@@ -457,40 +464,84 @@ const processAndWriteStep = createStep({
     await writeSheet(inputData.spreadsheetId, tabName, [header]);
     await writeSheet(inputData.spreadsheetId, SHEET_TABS.results, [header]);
     logger?.info(
-      `📊 [Step 4] Initialized tabs "${tabName}" and "${SHEET_TABS.results}" — processing ${inputData.discoveredCompanies.length} companies in batches of 5`,
+      `📊 [Step 4] Initialized tabs — processing ${inputData.existingCompanies.length} existing (summary only) + ${inputData.newCompanies.length} new (fit assessment) companies`,
     );
 
     const batchSize = 5;
     let rowsWritten = 0;
-    const totalBatches = Math.ceil(inputData.discoveredCompanies.length / batchSize);
 
-    for (let i = 0; i < inputData.discoveredCompanies.length; i += batchSize) {
-      const batchNum = Math.floor(i / batchSize) + 1;
-      checkTimeout(inputData.workflowStartTime, `Step 4 - Batch ${batchNum}/${totalBatches}`, logger);
-      const batch = inputData.discoveredCompanies.slice(i, i + batchSize);
-      logger?.info(`📝 [Step 4] Batch ${batchNum}/${totalBatches}: generating overviews for ${batch.length} companies`);
+    // --- Pass 1: Existing companies — summary only, all kept ---
+    if (inputData.existingCompanies.length > 0) {
+      const existingBatches = Math.ceil(inputData.existingCompanies.length / batchSize);
+      logger?.info(`📝 [Step 4] Pass 1: ${inputData.existingCompanies.length} existing companies in ${existingBatches} batches`);
 
-      const result = await generateOverviewTool.execute({ companies: batch }, { mastra });
+      for (let i = 0; i < inputData.existingCompanies.length; i += batchSize) {
+        const batchNum = Math.floor(i / batchSize) + 1;
+        checkTimeout(inputData.workflowStartTime, `Step 4 - Existing batch ${batchNum}/${existingBatches}`, logger);
+        const batch = inputData.existingCompanies.slice(i, i + batchSize);
 
-      const rows = result.companiesWithOverviews.map((c) => [
-        c.name,
-        c.website,
-        c.overview,
-        `[${c.fitStatus}] ${c.fitRationale}`,
-      ]);
+        const result = await generateOverviewTool.execute({ companies: batch, overviewOnly: true }, { mastra });
 
-      await appendSheetRows(inputData.spreadsheetId, tabName, rows);
-      await appendSheetRows(inputData.spreadsheetId, SHEET_TABS.results, rows);
-      rowsWritten += rows.length;
-      logger?.info(`✅ [Step 4] Batch ${batchNum}/${totalBatches}: wrote ${rows.length} rows (${rowsWritten} total so far)`);
+        const rows = result.companiesWithOverviews.map((c) => [
+          c.name,
+          c.website,
+          c.overview,
+          "",
+        ]);
+
+        await appendSheetRows(inputData.spreadsheetId, tabName, rows);
+        await appendSheetRows(inputData.spreadsheetId, SHEET_TABS.results, rows);
+        rowsWritten += rows.length;
+        logger?.info(`✅ [Step 4] Existing batch ${batchNum}/${existingBatches}: wrote ${rows.length} rows (${rowsWritten} total)`);
+      }
+    }
+
+    // --- Pass 2: New companies — fit assessment, Poor Fit excluded ---
+    let poorFitCount = 0;
+    if (inputData.newCompanies.length > 0) {
+      const newBatches = Math.ceil(inputData.newCompanies.length / batchSize);
+      logger?.info(`📝 [Step 4] Pass 2: ${inputData.newCompanies.length} new companies in ${newBatches} batches (Poor Fit will be excluded)`);
+
+      for (let i = 0; i < inputData.newCompanies.length; i += batchSize) {
+        const batchNum = Math.floor(i / batchSize) + 1;
+        checkTimeout(inputData.workflowStartTime, `Step 4 - New batch ${batchNum}/${newBatches}`, logger);
+        const batch = inputData.newCompanies.slice(i, i + batchSize);
+
+        const result = await generateOverviewTool.execute({ companies: batch }, { mastra });
+
+        const qualifiedRows = result.companiesWithOverviews
+          .filter((c) => c.fitStatus !== "Poor Fit")
+          .map((c) => [
+            c.name,
+            c.website,
+            c.overview,
+            `[${c.fitStatus}] ${c.fitRationale}`,
+          ]);
+
+        const batchPoorFit = result.companiesWithOverviews.filter((c) => c.fitStatus === "Poor Fit");
+        poorFitCount += batchPoorFit.length;
+
+        for (const pf of batchPoorFit) {
+          logger?.info(`🚫 [Step 4] Excluded Poor Fit: "${pf.name}"`);
+        }
+
+        if (qualifiedRows.length > 0) {
+          await appendSheetRows(inputData.spreadsheetId, tabName, qualifiedRows);
+          await appendSheetRows(inputData.spreadsheetId, SHEET_TABS.results, qualifiedRows);
+          rowsWritten += qualifiedRows.length;
+        }
+        logger?.info(`✅ [Step 4] New batch ${batchNum}/${newBatches}: ${qualifiedRows.length} kept, ${batchPoorFit.length} excluded (${rowsWritten} total)`);
+      }
     }
 
     const summary = `Territory Intelligence Discovery Complete!
 - Iterations: ${inputData.totalIterations}
-- Companies processed: ${rowsWritten}
+- Existing companies (summaries): ${inputData.existingCompanies.length}
+- New companies discovered: ${inputData.newCompanies.length}
+- New companies excluded (Poor Fit): ${poorFitCount}
 - Duplicates removed: ${inputData.totalDuplicatesRemoved}
 - Out of territory: ${inputData.totalOutOfTerritory}
-- Rows written to sheet: ${rowsWritten}
+- Total rows written to sheet: ${rowsWritten}
 - Sheet URL: ${spreadsheetUrl}`;
 
     await appendSheetRows(inputData.spreadsheetId, SHEET_TABS.runLog, [
