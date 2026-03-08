@@ -9,6 +9,18 @@ import { writeProspectsTool } from "../tools/writeProspects";
 import { appendSheetRows } from "../tools/googleSheets";
 import { SHEET_TABS } from "../tools/sheetConfig";
 
+const WORKFLOW_TIMEOUT_MS = 60 * 60 * 1000;
+
+function checkTimeout(startTime: number, stepName: string, logger?: any): void {
+  const elapsed = Date.now() - startTime;
+  if (elapsed > WORKFLOW_TIMEOUT_MS) {
+    const minutes = Math.round(elapsed / 60000);
+    const msg = `⛔ [FAILSAFE] Workflow exceeded 1-hour timeout (${minutes} min elapsed) during ${stepName}. Terminating.`;
+    logger?.error(msg);
+    throw new Error(msg);
+  }
+}
+
 const companySchema = z.object({
   name: z.string(),
   website: z.string(),
@@ -26,11 +38,14 @@ const loadExclusionData = createStep({
     excludedCompanies: z.array(companySchema),
     startingList: z.array(companySchema),
     dontSearch: z.array(companySchema),
+    workflowStartTime: z.number(),
   }),
 
   execute: async ({ mastra }) => {
     const logger = mastra?.getLogger();
+    const startTime = Date.now();
     logger?.info("📋 [Step 1] Loading exclusion data from Google Sheets...");
+    logger?.info("⏱️ [Step 1] Workflow started with 1-hour failsafe timeout");
 
     const result = await loadExclusionListsTool.execute({}, { mastra });
     if ("error" in result && result.error) {
@@ -50,6 +65,7 @@ const loadExclusionData = createStep({
       excludedCompanies: result.excludedCompanies,
       startingList: result.startingList,
       dontSearch,
+      workflowStartTime: startTime,
     };
   },
 });
@@ -64,6 +80,7 @@ const deduplicateStartingList = createStep({
     excludedCompanies: z.array(companySchema),
     startingList: z.array(companySchema),
     dontSearch: z.array(companySchema),
+    workflowStartTime: z.number(),
   }),
 
   outputSchema: z.object({
@@ -73,10 +90,12 @@ const deduplicateStartingList = createStep({
     dontSearch: z.array(companySchema),
     ignoredRemoved: z.number(),
     duplicatesRemoved: z.number(),
+    workflowStartTime: z.number(),
   }),
 
   execute: async ({ inputData, mastra }) => {
     const logger = mastra?.getLogger();
+    checkTimeout(inputData.workflowStartTime, "Step 1b - Deduplication", logger);
     const originalCount = inputData.startingList.length;
     logger?.info(
       `🧹 [Step 1b] Deduplicating ${originalCount} existing companies...`,
@@ -149,6 +168,7 @@ const deduplicateStartingList = createStep({
       dontSearch: inputData.dontSearch,
       ignoredRemoved,
       duplicatesRemoved,
+      workflowStartTime: inputData.workflowStartTime,
     };
   },
 });
@@ -165,6 +185,7 @@ const validateStartingList = createStep({
     dontSearch: z.array(companySchema),
     ignoredRemoved: z.number(),
     duplicatesRemoved: z.number(),
+    workflowStartTime: z.number(),
   }),
 
   outputSchema: z.object({
@@ -172,10 +193,12 @@ const validateStartingList = createStep({
     validatedStartingList: z.array(companySchema),
     dontSearch: z.array(companySchema),
     invalidCount: z.number(),
+    workflowStartTime: z.number(),
   }),
 
   execute: async ({ inputData, mastra }) => {
     const logger = mastra?.getLogger();
+    checkTimeout(inputData.workflowStartTime, "Step 2 - Validation", logger);
     logger?.info(
       `🔍 [Step 2] Using ${inputData.startingList.length} existing companies as pre-validated`,
     );
@@ -198,6 +221,7 @@ const validateStartingList = createStep({
       validatedStartingList,
       dontSearch: validatedDontSearch,
       invalidCount: 0,
+      workflowStartTime: inputData.workflowStartTime,
     };
   },
 });
@@ -212,6 +236,7 @@ const runDiscoveryLoop = createStep({
     validatedStartingList: z.array(companySchema),
     dontSearch: z.array(companySchema),
     invalidCount: z.number(),
+    workflowStartTime: z.number(),
   }),
 
   outputSchema: z.object({
@@ -225,10 +250,12 @@ const runDiscoveryLoop = createStep({
     totalIterations: z.number(),
     totalDuplicatesRemoved: z.number(),
     totalOutOfTerritory: z.number(),
+    workflowStartTime: z.number(),
   }),
 
   execute: async ({ inputData, mastra }) => {
     const logger = mastra?.getLogger();
+    checkTimeout(inputData.workflowStartTime, "Step 3 - Discovery start", logger);
     logger?.info("🔄 [Step 3] Starting discovery loop...");
 
     let dontSearch = [...inputData.dontSearch];
@@ -240,12 +267,13 @@ const runDiscoveryLoop = createStep({
     let totalDuplicatesRemoved = 0;
     let totalOutOfTerritory = 0;
     const maxIterations = parseInt(
-      process.env.MAX_DISCOVERY_ITERATIONS || "20",
+      process.env.MAX_DISCOVERY_ITERATIONS || "10",
       10,
     );
 
     while (zeroRounds < 3 && iteration < maxIterations) {
       iteration++;
+      checkTimeout(inputData.workflowStartTime, `Step 3 - Discovery iteration ${iteration}`, logger);
       logger?.info(
         `\n🔄 [Step 3] === Iteration ${iteration} (${zeroRounds} consecutive zero rounds) ===`,
       );
@@ -367,6 +395,7 @@ const runDiscoveryLoop = createStep({
       totalIterations: iteration,
       totalDuplicatesRemoved,
       totalOutOfTerritory,
+      workflowStartTime: inputData.workflowStartTime,
     };
   },
 });
@@ -382,6 +411,7 @@ const generateOverviewsStep = createStep({
     totalIterations: z.number(),
     totalDuplicatesRemoved: z.number(),
     totalOutOfTerritory: z.number(),
+    workflowStartTime: z.number(),
   }),
 
   outputSchema: z.object({
@@ -401,10 +431,12 @@ const generateOverviewsStep = createStep({
       totalOutOfTerritory: z.number(),
       totalDiscovered: z.number(),
     }),
+    workflowStartTime: z.number(),
   }),
 
   execute: async ({ inputData, mastra }) => {
     const logger = mastra?.getLogger();
+    checkTimeout(inputData.workflowStartTime, "Step 4 - Overview generation start", logger);
     logger?.info(
       `📝 [Step 4] Generating overviews for ${inputData.discoveredCompanies.length} companies...`,
     );
@@ -420,10 +452,11 @@ const generateOverviewsStep = createStep({
           totalOutOfTerritory: inputData.totalOutOfTerritory,
           totalDiscovered: 0,
         },
+        workflowStartTime: inputData.workflowStartTime,
       };
     }
 
-    const batchSize = 10;
+    const batchSize = 5;
     const allResults: {
       name: string;
       website: string;
@@ -433,6 +466,7 @@ const generateOverviewsStep = createStep({
     }[] = [];
 
     for (let i = 0; i < inputData.discoveredCompanies.length; i += batchSize) {
+      checkTimeout(inputData.workflowStartTime, `Step 4 - Overview batch ${Math.floor(i / batchSize) + 1}`, logger);
       const batch = inputData.discoveredCompanies.slice(i, i + batchSize);
       logger?.info(
         `📝 [Step 4] Generating overviews for batch ${Math.floor(i / batchSize) + 1} (${batch.length} companies)`,
@@ -474,6 +508,7 @@ const generateOverviewsStep = createStep({
         totalOutOfTerritory: inputData.totalOutOfTerritory,
         totalDiscovered: allResults.length,
       },
+      workflowStartTime: inputData.workflowStartTime,
     };
   },
 });
@@ -500,6 +535,7 @@ const writeResultsStep = createStep({
       totalOutOfTerritory: z.number(),
       totalDiscovered: z.number(),
     }),
+    workflowStartTime: z.number(),
   }),
 
   outputSchema: z.object({
@@ -511,6 +547,7 @@ const writeResultsStep = createStep({
 
   execute: async ({ inputData, mastra }) => {
     const logger = mastra?.getLogger();
+    checkTimeout(inputData.workflowStartTime, "Step 5 - Write results", logger);
     logger?.info(
       `📊 [Step 5] Writing ${inputData.companiesWithOverviews.length} companies to Google Sheet...`,
     );

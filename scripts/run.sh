@@ -3,6 +3,7 @@
 set -e
 
 export NODE_ENV=production
+export NODE_OPTIONS="--max-old-space-size=4096"
 
 INNGEST_CONFIG=".config/inngest/inngest.yaml"
 
