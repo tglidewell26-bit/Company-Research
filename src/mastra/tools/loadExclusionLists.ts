@@ -83,9 +83,10 @@ export const loadExclusionListsTool = createTool({
     );
 
     const parseRows = (rows: string[][]) => {
+      const firstCell = rows[0][0]?.toLowerCase() ?? "";
       const hasHeader =
         rows.length > 0 &&
-        rows[0][0]?.toLowerCase().includes("company") &&
+        (firstCell.includes("company") || firstCell === "name") &&
         rows[0].length >= 2;
       const dataRows = hasHeader ? rows.slice(1) : rows;
       return dataRows

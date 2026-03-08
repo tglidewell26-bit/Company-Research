@@ -53,16 +53,12 @@ export const writeProspectsTool = createTool({
 
     const data = [header, ...rows];
 
-    await writeSheet(inputData.spreadsheetId, SHEET_TABS.results, data);
+    await writeSheet(inputData.spreadsheetId, tabName, data);
 
-    for (const aliasTab of SHEET_TAB_ALIASES.results) {
-      if (aliasTab !== SHEET_TABS.results) {
-        await writeSheet(inputData.spreadsheetId, aliasTab, data);
-        logger?.info(
-          `📊 [writeProspects] Mirrored output to legacy tab: ${aliasTab}`,
-        );
-      }
-    }
+    await writeSheet(inputData.spreadsheetId, SHEET_TABS.results, data);
+    logger?.info(
+      `📊 [writeProspects] Mirrored output to latest tab: ${SHEET_TABS.results}`,
+    );
 
     const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${inputData.spreadsheetId}`;
 

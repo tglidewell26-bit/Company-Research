@@ -259,9 +259,7 @@ const runDiscoveryLoop = createStep({
     logger?.info("🔄 [Step 3] Starting discovery loop...");
 
     let dontSearch = [...inputData.dontSearch];
-    const allDiscovered: { name: string; website: string }[] = [
-      ...inputData.validatedStartingList,
-    ];
+    const allDiscovered: { name: string; website: string }[] = [];
     let zeroRounds = 0;
     let iteration = 0;
     let totalDuplicatesRemoved = 0;
