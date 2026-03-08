@@ -30,6 +30,7 @@ export const generateOverviewTool = createTool({
         website: z.string(),
       }),
     ),
+    overviewOnly: z.boolean().optional(),
   }),
 
   outputSchema: z.object({
@@ -46,8 +47,9 @@ export const generateOverviewTool = createTool({
 
   execute: async (inputData, context) => {
     const logger = context?.mastra?.getLogger();
+    const overviewOnly = inputData.overviewOnly === true;
     logger?.info(
-      `📝 [overviewGenerator] Generating overviews + fit logic for ${inputData.companies.length} companies using ${DEFAULT_OPENAI_MODEL}`,
+      `📝 [overviewGenerator] Generating ${overviewOnly ? "summaries only" : "overviews + fit logic"} for ${inputData.companies.length} companies using ${DEFAULT_OPENAI_MODEL}`,
     );
 
     if (!hasOpenAIConfig()) {
@@ -60,7 +62,20 @@ export const generateOverviewTool = createTool({
       .map((c, i) => `${i + 1}. "${c.name}" (website: ${c.website})`)
       .join("\n");
 
-    const prompt = `For each biotechnology/pharmaceutical/CRO company below, return:
+    const prompt = overviewOnly
+      ? `For each biotechnology/pharmaceutical/CRO company below, return a factual 5-sentence overview.
+
+Companies:
+${companyList}
+
+Return ONLY valid JSON array with objects:
+{
+  "name": "exact input name",
+  "overview": "exactly 5 sentences"
+}
+
+No markdown. JSON only.`
+      : `For each biotechnology/pharmaceutical/CRO company below, return:
 1) a factual 5-sentence overview,
 2) a fitStatus (Good Fit | Maybe | Poor Fit),
 3) a concise fitRationale explaining WHY the fit decision was made.
@@ -78,6 +93,9 @@ Return ONLY valid JSON array with objects:
 
 No markdown. JSON only.`;
 
+    const fallbackOverview = (name: string) =>
+      `${name} is a life sciences company located in the San Francisco Bay Area. The company is active in biotechnology-related research and development. Public information indicates it maintains operations relevant to therapeutic, diagnostic, or platform innovation. It appears to participate in the regional ecosystem of academic and industry partnerships. Additional diligence is recommended to confirm current pipeline priorities and commercial focus.`;
+
     try {
       const openAIText = await openAIChat(prompt);
       const parsed = parseAssessments(openAIText);
@@ -89,13 +107,9 @@ No markdown. JSON only.`;
         return {
           name: company.name,
           website: company.website,
-          overview:
-            found?.overview ||
-            `${company.name} is a life sciences company located in the San Francisco Bay Area. The company is active in biotechnology-related research and development. Public information indicates it maintains operations relevant to therapeutic, diagnostic, or platform innovation. It appears to participate in the regional ecosystem of academic and industry partnerships. Additional diligence is recommended to confirm current pipeline priorities and commercial focus.`,
-          fitStatus: found?.fitStatus || "Maybe",
-          fitRationale:
-            found?.fitRationale ||
-            "Insufficient structured data was available from this run to produce a higher-confidence fit judgment.",
+          overview: found?.overview || fallbackOverview(company.name),
+          fitStatus: (overviewOnly ? "Maybe" : (found?.fitStatus || "Maybe")) as "Good Fit" | "Maybe" | "Poor Fit",
+          fitRationale: overviewOnly ? "" : (found?.fitRationale || "Insufficient structured data was available from this run to produce a higher-confidence fit judgment."),
         };
       });
 
@@ -112,10 +126,9 @@ No markdown. JSON only.`;
         companiesWithOverviews: inputData.companies.map((c) => ({
           name: c.name,
           website: c.website,
-          overview: `${c.name} is a life sciences company located in the San Francisco Bay Area. The company is active in biotechnology-related research and development. Public information indicates it maintains operations relevant to therapeutic, diagnostic, or platform innovation. It appears to participate in the regional ecosystem of academic and industry partnerships. Additional diligence is recommended to confirm current pipeline priorities and commercial focus.`,
+          overview: fallbackOverview(c.name),
           fitStatus: "Maybe" as const,
-          fitRationale:
-            "Assessment fallback used because OpenAI response could not be parsed during this run.",
+          fitRationale: overviewOnly ? "" : "Assessment fallback used because OpenAI response could not be parsed during this run.",
         })),
       };
     }

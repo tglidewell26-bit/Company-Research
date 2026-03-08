@@ -48,7 +48,7 @@ export const writeProspectsTool = createTool({
       company.name,
       company.website,
       company.overview,
-      `[${company.fitStatus}] ${company.fitRationale}`,
+      company.fitRationale ? `[${company.fitStatus}] ${company.fitRationale}` : "",
     ]);
 
     const data = [header, ...rows];

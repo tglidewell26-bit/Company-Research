@@ -241,7 +241,13 @@ const runDiscoveryLoop = createStep({
 
   outputSchema: z.object({
     spreadsheetId: z.string(),
-    discoveredCompanies: z.array(
+    existingCompanies: z.array(
+      z.object({
+        name: z.string(),
+        website: z.string(),
+      }),
+    ),
+    newCompanies: z.array(
       z.object({
         name: z.string(),
         website: z.string(),
@@ -380,7 +386,7 @@ const runDiscoveryLoop = createStep({
       `\n🏁 [Step 3] Discovery loop complete after ${iteration} iterations`,
     );
     logger?.info(
-      `🏁 [Step 3] Total final qualified list: ${allDiscovered.length} companies (existing + newly discovered)`,
+      `🏁 [Step 3] Existing companies: ${inputData.validatedStartingList.length}, Newly discovered: ${allDiscovered.length}`,
     );
     logger?.info(
       `🏁 [Step 3] Total duplicates removed: ${totalDuplicatesRemoved}`,
@@ -389,7 +395,8 @@ const runDiscoveryLoop = createStep({
 
     return {
       spreadsheetId: inputData.spreadsheetId,
-      discoveredCompanies: allDiscovered,
+      existingCompanies: inputData.validatedStartingList,
+      newCompanies: allDiscovered,
       totalIterations: iteration,
       totalDuplicatesRemoved,
       totalOutOfTerritory,
@@ -401,11 +408,12 @@ const runDiscoveryLoop = createStep({
 const generateOverviewsStep = createStep({
   id: "generate-overviews",
   description:
-    "Generates 5-sentence AI overviews for all discovered companies.",
+    "Generates summaries for existing companies and fit assessments for newly discovered companies. Poor Fit new companies are excluded.",
 
   inputSchema: z.object({
     spreadsheetId: z.string(),
-    discoveredCompanies: z.array(companySchema),
+    existingCompanies: z.array(companySchema),
+    newCompanies: z.array(companySchema),
     totalIterations: z.number(),
     totalDuplicatesRemoved: z.number(),
     totalOutOfTerritory: z.number(),
@@ -428,6 +436,9 @@ const generateOverviewsStep = createStep({
       totalDuplicatesRemoved: z.number(),
       totalOutOfTerritory: z.number(),
       totalDiscovered: z.number(),
+      existingCount: z.number(),
+      newCount: z.number(),
+      poorFitExcluded: z.number(),
     }),
     workflowStartTime: z.number(),
   }),
@@ -436,23 +447,8 @@ const generateOverviewsStep = createStep({
     const logger = mastra?.getLogger();
     checkTimeout(inputData.workflowStartTime, "Step 4 - Overview generation start", logger);
     logger?.info(
-      `📝 [Step 4] Generating overviews for ${inputData.discoveredCompanies.length} companies...`,
+      `📝 [Step 4] Processing ${inputData.existingCompanies.length} existing (summary only) + ${inputData.newCompanies.length} new (fit assessment) companies`,
     );
-
-    if (inputData.discoveredCompanies.length === 0) {
-      logger?.info("📝 [Step 4] No companies to generate overviews for");
-      return {
-        spreadsheetId: inputData.spreadsheetId,
-        companiesWithOverviews: [],
-        stats: {
-          totalIterations: inputData.totalIterations,
-          totalDuplicatesRemoved: inputData.totalDuplicatesRemoved,
-          totalOutOfTerritory: inputData.totalOutOfTerritory,
-          totalDiscovered: 0,
-        },
-        workflowStartTime: inputData.workflowStartTime,
-      };
-    }
 
     const batchSize = 5;
     const allResults: {
@@ -462,39 +458,48 @@ const generateOverviewsStep = createStep({
       fitStatus: "Good Fit" | "Maybe" | "Poor Fit";
       fitRationale: string;
     }[] = [];
+    let poorFitExcluded = 0;
 
-    for (let i = 0; i < inputData.discoveredCompanies.length; i += batchSize) {
-      checkTimeout(inputData.workflowStartTime, `Step 4 - Overview batch ${Math.floor(i / batchSize) + 1}`, logger);
-      const batch = inputData.discoveredCompanies.slice(i, i + batchSize);
-      logger?.info(
-        `📝 [Step 4] Generating overviews for batch ${Math.floor(i / batchSize) + 1} (${batch.length} companies)`,
-      );
+    // --- Pass 1: Existing companies — summary only, all kept ---
+    if (inputData.existingCompanies.length > 0) {
+      const existingBatches = Math.ceil(inputData.existingCompanies.length / batchSize);
+      logger?.info(`📝 [Step 4] Pass 1: ${inputData.existingCompanies.length} existing companies in ${existingBatches} batches`);
 
-      const result = await generateOverviewTool.execute(
-        { companies: batch },
-        { mastra },
-      );
-      if ("error" in result && result.error) {
-        logger?.warn(
-          `⚠️ [Step 4] Overview generation failed for batch, using fallback`,
-        );
-        allResults.push(
-          ...batch.map((c) => ({
-            ...c,
-            overview: `${c.name} is a life sciences company located in the San Francisco Bay Area.`,
-            fitStatus: "Maybe",
-            fitRationale:
-              "Overview-generation fallback used due to model failure for this batch.",
-          })),
-        );
-        continue;
+      for (let i = 0; i < inputData.existingCompanies.length; i += batchSize) {
+        checkTimeout(inputData.workflowStartTime, `Step 4 - Existing batch ${Math.floor(i / batchSize) + 1}/${existingBatches}`, logger);
+        const batch = inputData.existingCompanies.slice(i, i + batchSize);
+
+        const result = await generateOverviewTool.execute({ companies: batch, overviewOnly: true }, { mastra });
+        allResults.push(...result.companiesWithOverviews.map((c) => ({ ...c, fitRationale: "" })));
+        logger?.info(`✅ [Step 4] Existing batch ${Math.floor(i / batchSize) + 1}/${existingBatches}: wrote ${batch.length} summaries`);
       }
+    }
 
-      allResults.push(...result.companiesWithOverviews);
+    // --- Pass 2: New companies — fit assessment, Poor Fit excluded ---
+    if (inputData.newCompanies.length > 0) {
+      const newBatches = Math.ceil(inputData.newCompanies.length / batchSize);
+      logger?.info(`📝 [Step 4] Pass 2: ${inputData.newCompanies.length} new companies in ${newBatches} batches (Poor Fit excluded)`);
+
+      for (let i = 0; i < inputData.newCompanies.length; i += batchSize) {
+        checkTimeout(inputData.workflowStartTime, `Step 4 - New batch ${Math.floor(i / batchSize) + 1}/${newBatches}`, logger);
+        const batch = inputData.newCompanies.slice(i, i + batchSize);
+
+        const result = await generateOverviewTool.execute({ companies: batch }, { mastra });
+
+        for (const c of result.companiesWithOverviews) {
+          if (c.fitStatus === "Poor Fit") {
+            poorFitExcluded++;
+            logger?.info(`🚫 [Step 4] Excluded Poor Fit: "${c.name}"`);
+          } else {
+            allResults.push(c);
+          }
+        }
+        logger?.info(`✅ [Step 4] New batch ${Math.floor(i / batchSize) + 1}/${newBatches}: kept ${result.companiesWithOverviews.filter(c => c.fitStatus !== "Poor Fit").length}, excluded ${result.companiesWithOverviews.filter(c => c.fitStatus === "Poor Fit").length}`);
+      }
     }
 
     logger?.info(
-      `✅ [Step 4] Generated ${allResults.length} company overviews`,
+      `✅ [Step 4] Complete: ${allResults.length} companies total (${inputData.existingCompanies.length} existing + ${allResults.length - inputData.existingCompanies.length} new), ${poorFitExcluded} Poor Fit excluded`,
     );
 
     return {
@@ -505,6 +510,9 @@ const generateOverviewsStep = createStep({
         totalDuplicatesRemoved: inputData.totalDuplicatesRemoved,
         totalOutOfTerritory: inputData.totalOutOfTerritory,
         totalDiscovered: allResults.length,
+        existingCount: inputData.existingCompanies.length,
+        newCount: inputData.newCompanies.length,
+        poorFitExcluded,
       },
       workflowStartTime: inputData.workflowStartTime,
     };
@@ -532,6 +540,9 @@ const writeResultsStep = createStep({
       totalDuplicatesRemoved: z.number(),
       totalOutOfTerritory: z.number(),
       totalDiscovered: z.number(),
+      existingCount: z.number(),
+      newCount: z.number(),
+      poorFitExcluded: z.number(),
     }),
     workflowStartTime: z.number(),
   }),
@@ -593,10 +604,12 @@ const writeResultsStep = createStep({
 
     const summary = `Territory Intelligence Discovery Complete!
 - Iterations: ${inputData.stats.totalIterations}
-- Companies discovered: ${inputData.stats.totalDiscovered}
+- Existing companies (summaries): ${inputData.stats.existingCount}
+- New companies discovered: ${inputData.stats.newCount}
+- New companies excluded (Poor Fit): ${inputData.stats.poorFitExcluded}
 - Duplicates removed: ${inputData.stats.totalDuplicatesRemoved}
 - Out of territory: ${inputData.stats.totalOutOfTerritory}
-- Rows written to sheet: ${writeResult.rowsWritten}
+- Total rows written to sheet: ${writeResult.rowsWritten}
 - Sheet URL: ${writeResult.spreadsheetUrl}`;
 
     await appendSheetRows(inputData.spreadsheetId, SHEET_TABS.runLog, [
